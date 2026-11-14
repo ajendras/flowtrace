@@ -129,6 +129,7 @@ from flowtrace import TraceContext
 
 with TraceContext(name="CustomerSupportAgent") as tc:
     tc.record_step("Load user profile", "setup")
+    tc.record_step("Log event")  # kind defaults to "step"
     
     with tc.step("Generate response", "phase"):
         tc.record_llm_call("You are a helpful agent...", "Here is your refund link", 87)
@@ -158,6 +159,9 @@ requests.post(
 ```python
 with tc.step("MemoryRead", "memory", {"key": "user:123"}):
     ...
+
+# record_step can omit the kind (defaults to "step")
+tc.record_step("Quick note")
 
 # Errors are automatically captured by the context manager
 with tc.step("RiskyAPI"):

@@ -154,12 +154,21 @@ class TraceContext:
             self.step_stack.pop()
 
     def record_step(
-        self, name: str, kind: str, data: Optional[Dict[str, Any]] = None
+        self,
+        name: str,
+        kind: str = "step",
+        data: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Record an instantaneous completed step.
 
         Useful for events that do not need their own nested children.
         The step is added to the current parent in the trace tree.
+
+        Args:
+            name: The name of the step/event.
+            kind: The category of step (default: "step"). Common values:
+                "llm", "tool", "error", "setup", "phase".
+            data: Optional dict of metadata to attach.
         """
         if data is None:
             data = {}
