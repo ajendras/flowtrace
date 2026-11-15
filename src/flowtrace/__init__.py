@@ -41,10 +41,20 @@ def run_server(port: int = 8080, host: str = "127.0.0.1") -> None:
 
 
 def __getattr__(name: str) -> Any:
-    """Lazy-load FlowTraceHandler so that langchain-core is only required when used."""
+    """Lazy-load FlowTraceHandler and the langchain submodule.
+
+    This ensures langchain-core is not imported unless the handler
+    or langchain integration is explicitly used. Also supports test
+    patching of flowtrace.langchain.
+    """
     if name == "FlowTraceHandler":
         from .langchain import FlowTraceHandler as _Handler
 
         globals()["FlowTraceHandler"] = _Handler
         return _Handler
+    if name == "langchain":
+        from . import langchain as _langchain
+
+        globals()["langchain"] = _langchain
+        return _langchain
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

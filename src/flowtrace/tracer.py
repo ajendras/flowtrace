@@ -105,11 +105,18 @@ class TraceContext:
 
         if exc_type is not None:
             error_data: Dict[str, Any] = {
+                "error": str(exc_val) if exc_val is not None else "unknown",
                 "error_type": exc_type.__name__,
-                "error_message": str(exc_val),
+                "error_message": str(exc_val) if exc_val is not None else "unknown",
                 "status": "failed",
             }
-            self.record_step("Execution Error", "error", error_data)
+            if (
+                not self.root_step.children
+                or self.root_step.children[-1].content.get("status") != "failed"
+            ):
+                self.record_step("Execution Error", "error", error_data)
+            else:
+                self.root_step.content.update(error_data)
 
         if self.token is not None:
             _current_trace_var.reset(self.token)
