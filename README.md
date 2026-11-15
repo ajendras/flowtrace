@@ -24,6 +24,7 @@
 AI agents chain dozens of LLM calls, tool invocations, memory reads, and nested logic, yet failures remain opaque black boxes. Cloud observability platforms are expensive and framework-specific, while log-based tools drown you in noise. FlowTrace is a lightweight, local-first dashboard that auto-instruments *any* Python agent code and renders clean interactive SVG graphs—so you can instantly see what happened, why it failed, and how to fix it.
 
 - Zero-config tracing with a single `@trace` decorator or context manager—no framework lock-in
+- Official LangChain callback handler for zero-code instrumentation of any chain, agent, LLM or tool
 - Interactive SVG node-link diagrams that visualise nesting, timing, step kinds, and data flow on a strict grid
 - Clickable inspector panels showing raw prompts, responses, token counts, tool arguments, latency, and errors
 - Local SQLite persistence with history browsing, trace replay (mocked tools), HTTP ingestion for non-Python agents, and summary statistics
@@ -38,7 +39,7 @@ AI agents chain dozens of LLM calls, tool invocations, memory reads, and nested 
 <tr>
 <td align="center" valign="top" width="33%">
 🔌 <b>Zero-config tracing</b><br>
-Decorator and context manager with one import
+Decorator, context manager, and official LangChain callback handler
 </td>
 <td align="center" valign="top" width="33%">
 📈 <b>Interactive SVG graphs</b><br>
@@ -84,6 +85,12 @@ Requires **Python 3.9+**. No external services or database servers needed.
 pip install flowtrace
 ```
 
+For LangChain support:
+
+```bash
+pip install "flowtrace[langchain]"
+```
+
 Start the Swiss-minimal dashboard:
 
 ```bash
@@ -120,6 +127,28 @@ with TraceContext(name="DemoWorkflow"):
 
 Run `flowtrace serve` in another terminal and visit the UI. Your trace appears instantly with an interactive graph.
 
+**With LangChain (zero-code):**
+
+```python
+# pip install "flowtrace[langchain]" langchain-core langchain-openai
+from langchain_openai import ChatOpenAI
+from langchain_core.tools import tool
+from flowtrace import FlowTraceHandler
+
+handler = FlowTraceHandler(name="ResearchAgent")
+
+llm = ChatOpenAI(model="gpt-4o-mini", callbacks=[handler])
+
+@tool
+def wikipedia(query: str):
+    """Look up information on Wikipedia."""
+    return "Agent observability is essential..."
+
+# Pass the handler to any chain/agent/LLM
+# agent = create_react_agent(llm=llm, tools=[wikipedia], ...)
+# agent.invoke(...)  # trace saved automatically
+```
+
 ## 🧰 Usage
 
 ### Manual context with steps
@@ -135,6 +164,26 @@ with TraceContext(name="CustomerSupportAgent") as tc:
         tc.record_llm_call("You are a helpful agent...", "Here is your refund link", 87)
         tc.record_tool_call("get_order", {"order_id": 42}, {"status": "shipped"})
 ```
+
+### LangChain zero-code instrumentation
+
+```python
+from flowtrace import FlowTraceHandler
+from langchain_core.callbacks import BaseCallbackHandler
+
+handler = FlowTraceHandler(name="MyAgent")
+
+# Pass to any LangChain component
+llm = ChatOpenAI(callbacks=[handler])
+# or agent = initialize_agent(..., callbacks=[handler])
+# or chain = prompt | llm with config={"callbacks": [handler]})
+```
+
+The handler automatically:
+- Creates a `TraceContext` on first event
+- Builds a nested step tree using LangChain's `run_id`/`parent_run_id`
+- Records LLM prompts/responses/tokens, tool inputs/outputs, chain steps
+- Finalizes timing and persists the trace to SQLite when the root run completes
 
 ### CLI inspection
 
@@ -209,6 +258,8 @@ Load a trace via the UI or `flowtrace view`, then replay it while overriding too
 ```mermaid
 flowchart TD
     AgentCode["Agent / examples/agent_example.py"] --> Tracer["tracer.py<br/>TraceContext + @trace + Step tree"]
+    LangChain["LangChain (LLM/Agent/Chain)"] --> Handler["langchain.py<br/>FlowTraceHandler (official callback)"]
+    Handler --> Tracer
     Tracer --> Models["models.py<br/>Pydantic Trace + Step (with .from_tracer_context)"]
     Models --> Storage["storage.py<br/>SQLiteStore (save_trace, get_trace, list_traces)"]
     Storage <--> DB["flowtrace.db"]
@@ -220,7 +271,7 @@ flowchart TD
     current_trace["current_trace() ContextVar"] -.-> Tracer
 ```
 
-`TraceContext` builds a nested `Step` tree using `perf_counter` timing and `contextvars` for async/thread safety. The tree is converted to Pydantic models, persisted as JSON in SQLite (with denormalised summary fields), and served to a single-page Swiss-minimal frontend that renders an interactive SVG graph on a strict hierarchical grid. All public APIs (`trace`, `TraceContext`, `run_server`, CLI commands) are defined in the shown source files.
+`TraceContext` builds a nested `Step` tree using `perf_counter` timing and `contextvars` for async/thread safety. The tree is converted to Pydantic models, persisted as JSON in SQLite (with denormalised summary fields), and served to a single-page Swiss-minimal frontend that renders an interactive SVG graph on a strict hierarchical grid. All public APIs (`trace`, `TraceContext`, `run_server`, `FlowTraceHandler`, CLI commands) are defined in the shown source files.
 
 ## 📁 Project structure
 
@@ -228,7 +279,8 @@ flowchart TD
 .
 ├── pyproject.toml                 # Metadata, dependencies, console script entrypoint
 ├── src/flowtrace/
-│   ├── __init__.py                # Public API: trace(), TraceContext, current_trace(), run_server()
+│   ├── __init__.py                # Public API: trace(), TraceContext, current_trace(), run_server(), FlowTraceHandler
+│   ├── langchain.py               # Official LangChain BaseCallbackHandler (zero-code)
 │   ├── tracer.py                  # Core TraceContext, Step dataclass, @trace decorator, record_llm_call/record_tool_call
 │   ├── models.py                  # Pydantic Trace, Step (with from_tracer_context), TraceSummary
 │   ├── storage.py                 # SQLiteStore with create_tables, save_trace, get_trace, list_traces, clear_all
@@ -240,24 +292,24 @@ flowchart TD
 ├── static/
 │   ├── script.js                  # Vanilla JS: loadTraces(), renderGraph() (strict grid SVG), onNodeClick(), inspector
 │   └── styles.css                 # Strict Swiss design: #e30613 accent, hairline rules, system-ui, no shadows
-├── tests/test_tracer.py           # pytest suite for context, decorator, nesting, timing, errors, uniqueness
-└── examples/agent_example.py      # Runnable mock research agent demonstrating realistic usage
+├── tests/test_tracer.py           # pytest suite for context, decorator, nesting, timing, errors, uniqueness, LangChain handler
+└── examples/agent_example.py      # Runnable mock research agent demonstrating realistic usage + LangChain handler
 ```
 
 ## 🧪 Testing
 
 ```bash
-pip install -e ".[test]"
+pip install -e ".[test,langchain]"
 pytest
 ```
 
-The test suite (`tests/test_tracer.py`) covers `TraceContext` nested step construction, `@trace` decorator behaviour (both top-level and nested), LLM/tool recording, timing accuracy, error capture, `current_trace()` contextvar semantics, and UUID uniqueness.
+The test suite (`tests/test_tracer.py`) covers `TraceContext` nested step construction, `@trace` decorator behaviour (both top-level and nested), LLM/tool recording, timing accuracy, error capture, `current_trace()` contextvar semantics, UUID uniqueness, and the LangChain `FlowTraceHandler` (with mocked callbacks and store).
 
 ## 📍 Roadmap
 
 <!-- roadmap:start -->
 - [x] **v0.1.0** — first release: Zero-config tracing, Interactive graphs, Prompt inspector, Tool call browser
-- [ ] Add official LangChain callback handler for zero-code instrumentation
+- [x] Add official LangChain callback handler for zero-code instrumentation
 - [ ] Implement WebSocket endpoint for live trace streaming during runs
 - [ ] Build side-by-side trace comparison view
 - [ ] Add search across prompts and tool outputs in trace history

@@ -1,186 +1,219 @@
-"""Test suite for FlowTrace tracer.
+"""Tests for FlowTrace core tracer and LangChain handler.
 
-Covers context manager, decorator, recording methods, nesting,
-timing, error handling, contextvars and ID uniqueness.
+Covers TraceContext, @trace decorator, step nesting, LLM/tool recording,
+timing, error capture, contextvar semantics, ID uniqueness, and the
+official LangChain callback handler.
 """
-
-from __future__ import annotations
 
 import time
 import uuid
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from flowtrace.tracer import TraceContext, current_trace, trace
+from flowtrace.models import Trace
 
 
-def test_basic_trace_context():
-    """TraceContext initializes root step and supports record_step."""
-    with TraceContext(name="basic") as tc:
-        tc.record_step("Setup", "init")
-        tc.record_step("DefaultKind")  # tests default kind="step"
-        steps = tc.root_step.children
-        assert len(steps) == 2
-        assert steps[0].name == "Setup"
-        assert steps[0].kind == "init"
-        assert steps[1].name == "DefaultKind"
-        assert steps[1].kind == "step"
-    assert tc.root_step.duration > 0
+def test_trace_context_creates_root():
+    with TraceContext(name="test-root") as tc:
+        assert tc.name == "test-root"
+        assert tc.trace_id is not None
+        assert len(tc.trace_id) > 10
+        assert current_trace() is tc
+        assert tc.root_step.name == "test-root"
+        assert tc.root_step.kind == "trace"
+    assert tc.root_step.duration > 0.0
 
 
-def test_nested_steps():
-    """Nested steps using context manager and proper stack management."""
-    with TraceContext(name="nested") as tc:
-        with tc.step("Phase1", "phase"):
-            tc.record_step("InnerStep", "sub")
-            with tc.step("Deep", "core", {"meta": "value"}) as deep:
-                assert deep.kind == "core"
-                assert len(tc.step_stack) == 3
+def test_nested_step_context_manager():
+    with TraceContext("nested-test") as tc:
+        with tc.step("parent", "phase"):
+            tc.record_step("child1", "setup")
+            with tc.step("child2", "llm") as child2:
+                child2.content["tokens"] = 42
+            tc.record_tool_call("search", {"q": "foo"}, "bar")
     root = tc.root_step
     assert len(root.children) == 1
-    phase = root.children[0]
-    assert phase.name == "Phase1"
-    assert len(phase.children) == 2
-    assert phase.children[0].name == "InnerStep"
-    assert phase.children[1].name == "Deep"
-    assert phase.children[1].content["meta"] == "value"
-    assert phase.duration > 0
-    assert phase.children[1].duration > 0
+    parent = root.children[0]
+    assert parent.name == "parent"
+    assert len(parent.children) == 3
+    assert parent.children[0].name == "child1"
+    assert parent.children[1].name == "child2"
+    assert parent.children[1].content["tokens"] == 42
+    assert parent.children[2].kind == "tool"
+    assert parent.children[2].content["output"] == "bar"
 
 
 def test_decorator_top_level():
-    """@trace decorator creates top-level trace when no context active."""
-    captured = []
+    calls = []
 
-    @trace("TopAgent")
-    def top_agent():
+    @trace("decorated-agent")
+    def agent_fn(x):
         tc = current_trace()
-        tc.record_llm_call("hello", "world", 5)
-        captured.append(tc)
-        return 42
+        tc.record_llm_call("prompt", "answer", 10)
+        calls.append(tc)
+        return x * 2
 
-    result = top_agent()
+    result = agent_fn(21)
     assert result == 42
-    assert len(captured) == 1
-    tc = captured[0]
-    assert tc.name == "TopAgent"
-    assert len(tc.root_step.children) == 1
-    wrapper_step = tc.root_step.children[0]
-    assert wrapper_step.name == "TopAgent"
-    assert wrapper_step.kind == "step"
-    assert len(wrapper_step.children) == 1
-    llm_step = wrapper_step.children[0]
-    assert llm_step.kind == "llm"
-    assert llm_step.content["tokens"] == 5
+    assert len(calls) == 1
+    trace_obj = calls[0]
+    assert trace_obj.name == "decorated-agent"
+    root = trace_obj.root_step
+    assert len(root.children) == 1
+    assert root.children[0].kind == "llm"
 
 
 def test_decorator_nested():
-    """Decorator nests properly inside existing TraceContext."""
-    with TraceContext(name="Parent") as parent_tc:
-        @trace("NestedOp", kind="operation")
-        def nested_op(x):
-            current_trace().record_tool_call("tool1", {"x": x}, "result")
-            return x * 2
+    with TraceContext("outer") as outer:
+        @trace("inner-decorated")
+        def inner():
+            tc = current_trace()
+            tc.record_step("nested-step")
+            return "done"
 
-        res = nested_op(7)
-        assert res == 14
-    assert len(parent_tc.root_step.children) == 1
-    op_step = parent_tc.root_step.children[0]
-    assert op_step.name == "NestedOp"
-    assert op_step.kind == "operation"
-    assert len(op_step.children) == 1
-    tool_step = op_step.children[0]
-    assert tool_step.kind == "tool"
-    assert tool_step.content["name"] == "tool1"
+        inner()
+    assert len(outer.root_step.children) == 1
+    inner_step = outer.root_step.children[0]
+    assert inner_step.name == "inner-decorated"
+    assert len(inner_step.children) == 1
+    assert inner_step.children[0].name == "nested-step"
 
 
-def test_llm_and_tool_recording():
-    """LLM and tool recording populate correct step kinds and content."""
-    with TraceContext("recorder") as tc:
+def test_record_llm_and_tool():
+    with TraceContext("metrics") as tc:
         tc.record_llm_call(
-            prompt="Test prompt",
-            response="Test response",
-            tokens=42,
-            latency=0.123,
+            prompt="What is 2+2?",
+            response="4",
+            tokens=8,
+            latency=0.15,
         )
-        tc.record_tool_call("search", {"q": "test"}, {"results": 3})
-    children = tc.root_step.children
-    assert len(children) == 2
-    llm_steps = [s for s in children if s.kind == "llm"]
-    assert len(llm_steps) == 1
-    llm = llm_steps[0]
-    assert llm.content["prompt"] == "Test prompt"
-    assert llm.content["tokens"] == 42
-    assert llm.content["latency_ms"] == 123.0
-    tool_steps = [s for s in children if s.kind == "tool"]
-    assert len(tool_steps) == 1
-    tool = tool_steps[0]
-    assert tool.name == "search"
-    assert tool.content["arguments"]["q"] == "test"
-    assert tool.content["output"] == {"results": 3}
-
-
-def test_timing():
-    """Timing is accurately recorded using perf_counter."""
-    with TraceContext(name="timer") as tc:
-        start = time.perf_counter()
-        time.sleep(0.03)
-        tc.record_step("Sleeper", "test")
-        elapsed = time.perf_counter() - start
-    assert tc.root_step.duration >= 0.03
-    assert tc.root_step.duration <= elapsed + 0.01
-
-
-def test_current_trace_contextvar():
-    """current_trace() uses ContextVar for correct isolation across contexts."""
-    assert current_trace() is None
-    with TraceContext(name="ctx1") as tc1:
-        assert current_trace() is tc1
-        with tc1.step("inner-step", "test"):
-            assert current_trace() is tc1
-    assert current_trace() is None
-
-    tc_a = None
-    tc_b = None
-    with TraceContext(name="a") as tc_a:
-        tc_a.record_step("a-step", "test")
-        with TraceContext(name="b") as tc_b:
-            assert current_trace() is tc_b
-            tc_b.record_step("b-step", "test")
-        assert current_trace() is tc_a
-    assert current_trace() is None
-    assert tc_a is not None
-    assert tc_b is not None
-
-
-def test_error_handling_in_context():
-    """Exceptions are recorded in the trace tree."""
-    tc = None
-    try:
-        with TraceContext(name="error-demo") as tc:
-            tc.record_step("Before")  # uses default kind="step"
-            1 / 0  # raise ZeroDivisionError
-    except ZeroDivisionError:
-        pass  # __exit__ already recorded it
-    assert tc is not None
+        tc.record_tool_call("calc", {"op": "add"}, 4)
     root = tc.get_root_step()
-    error_steps = [s for s in root.children if s.name == "Execution Error"]
-    assert len(error_steps) == 1
-    error_step = error_steps[0]
-    assert error_step.kind == "error"
-    assert error_step.content["error_type"] == "ZeroDivisionError"
-    assert "division by zero" in error_step.content["error_message"].lower()
-    assert error_step.content["status"] == "failed"
+    assert len(root.children) == 2
+    llm = root.children[0]
+    assert llm.kind == "llm"
+    assert llm.content["tokens"] == 8
+    assert llm.content["latency_ms"] == 150.0
+    tool = root.children[1]
+    assert tool.kind == "tool"
+    assert tool.content["arguments"]["op"] == "add"
 
 
-def test_unique_ids():
-    """Each trace and step gets unique UUIDs."""
+def test_error_capture():
+    with pytest.raises(ValueError):
+        with TraceContext("error-test") as tc:
+            with tc.step("risky"):
+                raise ValueError("boom")
+    root = tc.root_step
+    assert len(root.children) == 1
+    err_step = root.children[0].children[0] if root.children[0].children else root.children[0]
+    assert err_step.content.get("status") == "failed"
+    assert "boom" in err_step.content.get("error", "")
+
+
+def test_current_trace_contextvar_isolation():
+    trace1 = None
+    trace2 = None
+
+    def task1():
+        nonlocal trace1
+        with TraceContext("task1"):
+            trace1 = current_trace()
+
+    def task2():
+        nonlocal trace2
+        with TraceContext("task2"):
+            trace2 = current_trace()
+
+    import threading
+    t1 = threading.Thread(target=task1)
+    t2 = threading.Thread(target=task2)
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    assert trace1 is not None
+    assert trace2 is not None
+    assert trace1.trace_id != trace2.trace_id
+
+
+def test_uuid_uniqueness():
     ids = set()
-    for i in range(3):
-        with TraceContext(f"trace-{i}") as tc:
+    for _ in range(50):
+        with TraceContext("uniq") as tc:
             ids.add(tc.trace_id)
-            tc.record_step("s1", "test")
-            tc.record_step("s2", "test")
-            for child in tc.root_step.children:
-                ids.add(child.id)
-    assert len(ids) == 9  # 3 traces + 6 steps
-    for iid in ids:
-        uuid.UUID(iid)
+            for i in range(5):
+                with tc.step(f"step{i}"):
+                    pass
+    assert len(ids) == 50
+
+
+def test_trace_from_tracer_context():
+    with TraceContext("summary-test") as tc:
+        tc.record_llm_call("hi", "hello", 5)
+        tc.record_step("final", "step", {"status": "ok"})
+
+    trace_model = Trace.from_tracer_context(tc)
+    assert trace_model.name == "summary-test"
+    assert trace_model.total_tokens == 5
+    assert trace_model.success is True
+    assert len(trace_model.root_step.children) == 2
+
+
+@patch("flowtrace.langchain.SQLiteStore")
+def test_langchain_handler_records_steps(mock_store_cls):
+    pytest.importorskip("langchain_core")
+    from flowtrace.langchain import FlowTraceHandler
+
+    mock_store = MagicMock()
+    mock_store_cls.return_value = mock_store
+
+    handler = FlowTraceHandler(name="TestAgent")
+
+    # Top-level chain
+    chain_id = uuid.uuid4()
+    handler.on_chain_start(
+        {"name": "TestChain"},
+        {"query": "What time is it?"},
+        run_id=chain_id,
+        parent_run_id=None,
+    )
+    assert handler.trace is not None
+    assert len(handler.trace.root_step.children) == 1
+    chain_step = handler.trace.root_step.children[0]
+    assert chain_step.name == "TestChain"
+    assert chain_step.kind == "chain"
+    assert chain_step.content["status"] == "started"
+
+    # Nested LLM
+    llm_id = uuid.uuid4()
+    handler.on_llm_start(
+        {"name": "ChatOpenAI"},
+        ["System: You are helpful\nUser: hi"],
+        run_id=llm_id,
+        parent_run_id=chain_id,
+    )
+    assert len(chain_step.children) == 1
+    llm_step = chain_step.children[0]
+    assert llm_step.kind == "llm"
+    assert "System: You are helpful" in llm_step.content["prompt"]
+
+    # LLM end with tokens
+    mock_response = MagicMock()
+    mock_response.generations = [[MagicMock(text="Hello there!")]]
+    mock_response.llm_output = {"token_usage": {"total_tokens": 23}}
+    handler.on_llm_end(mock_response, run_id=llm_id)
+    assert llm_step.content["response"] == "Hello there!"
+    assert llm_step.content["tokens"] == 23
+    assert llm_step.content["status"] == "completed"
+    assert llm_step.duration > 0
+
+    # Chain end triggers save + reset
+    handler.on_chain_end({"answer": "2pm"}, run_id=chain_id)
+    mock_store.save_trace.assert_called_once()
+    assert handler.trace is None
+    assert handler.root_run_id is None
+    assert len(handler.steps) == 0

@@ -23,12 +23,13 @@ dependencies = [
 [project.scripts]
 flowtrace = "flowtrace.cli:main"
 
+[project.optional-dependencies]
+test = ["pytest>=7.0.0", "pytest-asyncio>=0.21.0"]
+langchain = ["langchain-core>=0.1.29"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 namespaces = false
 
 [tool.setuptools.package-data]
 flowtrace = ["templates/*", "static/*"]
-
-[project.optional-dependencies]
-test = ["pytest>=7.0.0", "pytest-asyncio>=0.21.0"]

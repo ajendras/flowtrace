@@ -12,7 +12,7 @@ from typing import Any, Callable, Optional, Union
 from .tracer import TraceContext, current_trace, trace
 
 __version__ = "0.1.0"
-__all__ = ["trace", "TraceContext", "current_trace", "run_server"]
+__all__ = ["trace", "TraceContext", "current_trace", "run_server", "FlowTraceHandler"]
 
 
 def run_server(port: int = 8080, host: str = "127.0.0.1") -> None:
@@ -38,3 +38,13 @@ def run_server(port: int = 8080, host: str = "127.0.0.1") -> None:
         log_level="info",
         access_log=True,
     )
+
+
+def __getattr__(name: str) -> Any:
+    """Lazy-load FlowTraceHandler so that langchain-core is only required when used."""
+    if name == "FlowTraceHandler":
+        from .langchain import FlowTraceHandler as _Handler
+
+        globals()["FlowTraceHandler"] = _Handler
+        return _Handler
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
