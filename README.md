@@ -70,10 +70,13 @@ Re-execute saved traces with mocked tools
 POST endpoint for non-Python or remote agents
 </td>
 <td align="center" valign="top">
+🔴 <b>Live streaming</b><br>
+WebSocket endpoint — traces appear live as they run
+</td>
+<td align="center" valign="top">
 📊 <b>Summary statistics</b><br>
 Token usage, success rate, slowest steps and failure patterns
 </td>
-<td></td>
 </tr>
 </table>
 
@@ -121,11 +124,11 @@ def research(query: str):
     return "final answer"
 
 from flowtrace import TraceContext
-with TraceContext(name="DemoWorkflow"):
+with TraceContext(name="DemoWorkflow", live=True):
     research("LLM observability")
 ```
 
-Run `flowtrace serve` in another terminal and visit the UI. Your trace appears instantly with an interactive graph.
+Run `flowtrace serve` in another terminal and visit the UI. Your trace appears instantly (and builds live via WebSocket) with an interactive graph.
 
 **With LangChain (zero-code):**
 
@@ -135,7 +138,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
 from flowtrace import FlowTraceHandler
 
-handler = FlowTraceHandler(name="ResearchAgent")
+handler = FlowTraceHandler(name="ResearchAgent", live=True)
 
 llm = ChatOpenAI(model="gpt-4o-mini", callbacks=[handler])
 
@@ -165,13 +168,28 @@ with TraceContext(name="CustomerSupportAgent") as tc:
         tc.record_tool_call("get_order", {"order_id": 42}, {"status": "shipped"})
 ```
 
+### Live streaming
+
+Enable real-time WebSocket updates so the dashboard graph builds node-by-node while your agent runs (works with both manual `TraceContext` and the LangChain handler):
+
+```python
+from flowtrace import TraceContext, current_trace
+
+with TraceContext(name="LiveResearchAgent", live=True) as tc:
+    tc.record_llm_call(...)
+    tc.record_tool_call(...)
+    # UI updates instantly via /api/ws/traces/{id}
+```
+
+Set `FLOWTRACE_SERVER_URL=http://127.0.0.1:9000` if you use a non-default port.
+
 ### LangChain zero-code instrumentation
 
 ```python
 from flowtrace import FlowTraceHandler
 from langchain_core.callbacks import BaseCallbackHandler
 
-handler = FlowTraceHandler(name="MyAgent")
+handler = FlowTraceHandler(name="MyAgent", live=True)
 
 # Pass to any LangChain component
 llm = ChatOpenAI(callbacks=[handler])
@@ -250,6 +268,11 @@ Load a trace via the UI or `flowtrace view`, then replay it while overriding too
 <td><code>20</code> (CLI) / <code>50</code> (API)</td>
 <td>Number of traces returned by <code>list_traces(limit=...)</code> or <code>flowtrace list --limit 50</code></td>
 </tr>
+<tr>
+<td><code>live</code></td>
+<td><code>false</code></td>
+<td>Enable real-time WebSocket streaming (<code>TraceContext(..., live=True)</code> or <code>FlowTraceHandler(..., live=True)</code>; respects <code>FLOWTRACE_SERVER_URL</code> env var)</td>
+</tr>
 </tbody>
 </table>
 
@@ -257,15 +280,15 @@ Load a trace via the UI or `flowtrace view`, then replay it while overriding too
 
 ```mermaid
 flowchart TD
-    AgentCode["Agent / examples/agent_example.py"] --> Tracer["tracer.py<br/>TraceContext + @trace + Step tree"]
+    AgentCode["Agent / examples/agent_example.py"] --> Tracer["tracer.py<br/>TraceContext + @trace + Step tree<br/>(live=True streams via HTTP)"]
     LangChain["LangChain (LLM/Agent/Chain)"] --> Handler["langchain.py<br/>FlowTraceHandler (official callback)"]
     Handler --> Tracer
     Tracer --> Models["models.py<br/>Pydantic Trace + Step (with .from_tracer_context)"]
     Models --> Storage["storage.py<br/>SQLiteStore (save_trace, get_trace, list_traces)"]
     Storage <--> DB["flowtrace.db"]
-    Storage --> API["api.py<br/>FastAPI router (/api/traces, /graph, POST ingest)"]
+    Storage --> API["api.py<br/>FastAPI router (/api/traces, /graph, POST ingest, POST /live, WS /ws/traces/{id})"]
     API --> Server["server.py<br/>create_app() + Jinja templates + static mount"]
-    Server --> UI["templates/index.html + static/script.js<br/>SVG renderer + inspector"]
+    Server --> UI["templates/index.html + static/script.js<br/>SVG renderer + inspector + live WS client"]
     CLI["cli.py<br/>serve, list, view, clear"] --> Server
     External["Non-Python agents"] --> API
     current_trace["current_trace() ContextVar"] -.-> Tracer
@@ -310,7 +333,7 @@ The test suite (`tests/test_tracer.py`) covers `TraceContext` nested step constr
 <!-- roadmap:start -->
 - [x] **v0.1.0** — first release: Zero-config tracing, Interactive graphs, Prompt inspector, Tool call browser
 - [x] Add official LangChain callback handler for zero-code instrumentation
-- [ ] Implement WebSocket endpoint for live trace streaming during runs
+- [x] Implement WebSocket endpoint for live trace streaming during runs
 - [ ] Build side-by-side trace comparison view
 - [ ] Add search across prompts and tool outputs in trace history
 - [ ] Create first-party LlamaIndex integration adapter

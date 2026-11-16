@@ -4,16 +4,48 @@ Provides JSON endpoints consumed by the Swiss-minimal HTMX/Tailwind
 dashboard and the HTTP ingestion path for non-Python agents.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from datetime import datetime
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
 from typing import Any, Dict, List, Union
 
 from .models import Trace, TraceSummary
 from .storage import SQLiteStore
 
+
+class ConnectionManager:
+    """Manages WebSocket connections for live trace updates per trace_id."""
+
+    def __init__(self) -> None:
+        self.active_connections: Dict[str, List[WebSocket]] = {}
+
+    async def connect(self, websocket: WebSocket, trace_id: str) -> None:
+        await websocket.accept()
+        if trace_id not in self.active_connections:
+            self.active_connections[trace_id] = []
+        self.active_connections[trace_id].append(websocket)
+
+    def disconnect(self, websocket: WebSocket, trace_id: str) -> None:
+        if trace_id in self.active_connections:
+            if websocket in self.active_connections[trace_id]:
+                self.active_connections[trace_id].remove(websocket)
+            if not self.active_connections[trace_id]:
+                del self.active_connections[trace_id]
+
+    async def broadcast(self, trace_id: str, message: Dict[str, Any]) -> None:
+        if trace_id not in self.active_connections:
+            return
+        for connection in list(self.active_connections[trace_id]):
+            try:
+                await connection.send_json(message)
+            except Exception:
+                self.disconnect(connection, trace_id)
+
+
 router = APIRouter(prefix="/api", tags=["traces"])
 
 # Singleton store (lazy)
 _store: SQLiteStore | None = None
+manager = ConnectionManager()
 
 
 def get_store() -> SQLiteStore:
@@ -86,3 +118,68 @@ def get_trace_graph(
             detail=f"Trace with id '{trace_id}' not found",
         )
     return trace.root_step
+
+
+@router.websocket("/ws/traces/{trace_id}")
+async def websocket_trace_stream(websocket: WebSocket, trace_id: str):
+    """WebSocket endpoint for live trace streaming during runs.
+
+    Frontend connects here to receive real-time step and duration updates.
+    """
+    await manager.connect(websocket, trace_id)
+    try:
+        store = get_store()
+        trace = store.get_trace(trace_id)
+        if trace is not None:
+            await websocket.send_json(
+                {
+                    "type": "trace_update",
+                    "trace": trace.model_dump(mode="json"),
+                }
+            )
+        while True:
+            # Keep connection alive; client may send pings. On disconnect the
+            # exception is raised and we clean up.
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket, trace_id)
+    except Exception:
+        manager.disconnect(websocket, trace_id)
+
+
+@router.post("/traces/{trace_id}/live", status_code=status.HTTP_202_ACCEPTED)
+async def live_trace_update(
+    trace_id: str,
+    payload: Dict[str, Any],
+    store: SQLiteStore = Depends(get_store),
+) -> Dict[str, str]:
+    """Accept live updates from a TraceContext(live=True) and broadcast
+    via WebSocket to all connected dashboard clients.
+    """
+    try:
+        trace_dict: Dict[str, Any] = {
+            "id": trace_id,
+            "name": payload.get("name", "workflow"),
+            "root_step": payload.get("root_step"),
+            "start": payload.get("start"),
+            "duration": payload.get("duration", 0.0),
+            "success": payload.get("success", True),
+            "total_tokens": payload.get("total_tokens", 0),
+        }
+        trace = Trace.model_validate(trace_dict)
+        store.save_trace(trace)
+    except Exception:
+        # Still broadcast even if a partial trace cannot be saved yet
+        pass
+
+    await manager.broadcast(
+        trace_id,
+        {
+            "type": "trace_update",
+            "trace_id": trace_id,
+            "root_step": payload.get("root_step"),
+            "duration": payload.get("duration", 0.0),
+            "success": payload.get("success", True),
+        },
+    )
+    return {"status": "broadcasted"}

@@ -7,12 +7,14 @@ Supports nested execution trees with automatic timing.
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from datetime import datetime
 from functools import wraps
 from typing import Any, Dict, List, Optional, Union
 
@@ -73,15 +75,24 @@ class TraceContext:
     contextvar scope.
     """
 
-    def __init__(self, name: str = "workflow") -> None:
+    def __init__(self, name: str = "workflow", live: bool = False) -> None:
         """Create a new trace with a root step.
 
         Args:
             name: Human-readable name for the root trace step.
+            live: When True, each step completion posts the current tree
+                  to the dashboard so the UI can update the graph in
+                  real time via WebSocket (default: False).
         """
         self.trace_id: str = str(uuid.uuid4())
         self.name: str = name
+        self.live: bool = live
+        self.server_url: str = os.getenv(
+            "FLOWTRACE_SERVER_URL", "http://127.0.0.1:8080"
+        )
+        self.start: datetime = datetime.now()
         self.start_time: float = time.perf_counter()
+        self.success: bool = True
 
         self.root_step = Step(
             id=self.trace_id,
@@ -104,6 +115,7 @@ class TraceContext:
         self.root_step.duration = end_time - self.start_time
 
         if exc_type is not None:
+            self.success = False
             error_data: Dict[str, Any] = {
                 "error": str(exc_val) if exc_val is not None else "unknown",
                 "error_type": exc_type.__name__,
@@ -117,6 +129,9 @@ class TraceContext:
                 self.record_step("Execution Error", "error", error_data)
             else:
                 self.root_step.content.update(error_data)
+
+        if self.live:
+            self._stream_update()
 
         if self.token is not None:
             _current_trace_var.reset(self.token)
@@ -159,6 +174,8 @@ class TraceContext:
             end = time.perf_counter()
             step.duration = end - step.start
             self.step_stack.pop()
+            if self.live:
+                self._stream_update()
 
     def record_step(
         self,
@@ -230,6 +247,45 @@ class TraceContext:
             "output": output,
         }
         self.record_step(name, "tool", data)
+
+    def _count_tokens(self, step: Optional[Step] = None) -> int:
+        """Recursively count tokens from all LLM steps."""
+        if step is None:
+            step = self.root_step
+        total = 0
+        if step.kind == "llm" and isinstance(step.content, dict):
+            total += int(step.content.get("tokens", 0))
+        for child in step.children:
+            total += self._count_tokens(child)
+        return total
+
+    def _stream_update(self) -> None:
+        """Stream current trace state to the dashboard (when live=True).
+
+        Posts to the /live endpoint which persists a snapshot and
+        broadcasts via WebSocket to any connected UI clients.
+        Failures are silently ignored so user code is never broken.
+        """
+        if not self.live:
+            return
+        try:
+            import httpx
+
+            root_dict = self.root_step.to_dict()
+            payload = {
+                "name": self.name,
+                "root_step": root_dict,
+                "start": self.start.isoformat(),
+                "duration": round(time.perf_counter() - self.start_time, 3),
+                "success": self.success,
+                "total_tokens": self._count_tokens(),
+            }
+            url = f"{self.server_url}/api/traces/{self.trace_id}/live"
+            with httpx.Client(timeout=1.5) as client:
+                client.post(url, json=payload, headers={"User-Agent": "FlowTrace-Live"})
+        except Exception:
+            # Never break user code if the dashboard is unreachable.
+            pass
 
     def get_root_step(self) -> Step:
         """Return the root step of the trace tree.

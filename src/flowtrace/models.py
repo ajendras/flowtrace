@@ -94,9 +94,9 @@ class Trace(BaseModel):
             id=context.trace_id,
             name=context.name,
             root_step=root_step,
-            start=datetime.now(),
+            start=getattr(context, "start", datetime.now()),
             duration=getattr(context.root_step, "duration", 0.0),
-            success=success,
+            success=getattr(context, "success", success),
             total_tokens=total_tokens,
         )
 

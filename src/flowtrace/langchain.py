@@ -24,9 +24,10 @@ class FlowTraceHandler(BaseCallbackHandler):
     run_id/parent_run_id events and automatically saved on root completion.
     """
 
-    def __init__(self, name: str = "LangChainWorkflow") -> None:
+    def __init__(self, name: str = "LangChainWorkflow", live: bool = False) -> None:
         super().__init__()
         self.name = name
+        self.live = live
         self.trace: Optional[TraceContext] = None
         self.steps: Dict[str, Step] = {}
         self.root_run_id: Optional[str] = None
@@ -34,7 +35,7 @@ class FlowTraceHandler(BaseCallbackHandler):
 
     def _get_trace(self) -> TraceContext:
         if self.trace is None:
-            self.trace = TraceContext(name=self.name)
+            self.trace = TraceContext(name=self.name, live=self.live)
             self.trace.__enter__()
             self.store = SQLiteStore()
         return self.trace
