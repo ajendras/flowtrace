@@ -11,20 +11,31 @@ import time
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from langchain_core.callbacks.base import BaseCallbackHandler
+try:
+    from langchain_core.callbacks.base import BaseCallbackHandler
+except ImportError:
+    BaseCallbackHandler = object  # type: ignore[assignment]
+
 
 from .storage import SQLiteStore
 from .tracer import Step, TraceContext
 
 
-class FlowTraceHandler(BaseCallbackHandler):
+class FlowTraceHandler(BaseCallbackHandler):  # type: ignore[valid-type]
     """Callback handler that integrates LangChain with FlowTrace.
 
     Drop-in zero-code observability. Traces are built from LangChain
     run_id/parent_run_id events and automatically saved on root completion.
+
+    Requires langchain-core (install via the ``flowtrace[langchain]`` extra).
     """
 
     def __init__(self, name: str = "LangChainWorkflow", live: bool = False) -> None:
+        if BaseCallbackHandler is object:
+            raise ImportError(
+                "langchain-core is required for FlowTraceHandler. "
+                'Install with: pip install "flowtrace[langchain]"'
+            ) from None
         super().__init__()
         self.name = name
         self.live = live
