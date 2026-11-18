@@ -7,6 +7,7 @@ Supports nested execution trees with automatic timing.
 
 from __future__ import annotations
 
+import httpx
 import os
 import time
 import uuid
@@ -269,8 +270,6 @@ class TraceContext:
         if not self.live:
             return
         try:
-            import httpx
-
             root_dict = self.root_step.to_dict()
             payload = {
                 "name": self.name,
