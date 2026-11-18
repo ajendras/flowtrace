@@ -2,24 +2,37 @@
  * FlowTrace - Interactive Dashboard Script
  * Vanilla JS + SVG graph rendering for Swiss-minimal UI.
  * Features: trace list, hierarchical SVG node-link diagram on strict grid,
- * node inspector with prompt/response and tool data.
+ * node inspector with prompt/response and tool data, side-by-side comparison.
  */
 
 let currentTraceId = null;
 let currentRootStep = null;
 let selectedStepId = null;
+let compareMode = false;
+let selectedTraceIds = [];
+let currentComparison = null;
+let currentInspectorSide = 'left';
 
 const API_BASE = '/api';
+
+let ws = null;
 
 /**
  * Load recent traces and render them in the sidebar list.
  * Uses HTMX-style direct DOM updates.
  */
-async function loadTraces() {
+async function loadTraces(filter = '') {
     try {
         const res = await fetch(`${API_BASE}/traces?limit=40`);
         if (!res.ok) throw new Error('Failed to fetch traces');
-        const traces = await res.json();
+        let traces = await res.json();
+
+        if (filter) {
+            const term = filter.toLowerCase();
+            traces = traces.filter(t => 
+                t.name.toLowerCase().includes(term) || t.id.toLowerCase().includes(term)
+            );
+        }
 
         const container = document.getElementById('traces-list');
         if (!container) return;
@@ -39,346 +52,410 @@ async function loadTraces() {
 
         let html = '';
         for (const t of traces) {
-            const active = t.id === currentTraceId ? 'active' : '';
-            const date = new Date(t.start);
-            const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-            const status = t.success
-                ? `<span class="status-ok">OK</span>`
-                : `<span class="status-err">ERR</span>`;
-
+            const isSelected = selectedTraceIds.includes(t.id);
+            const statusClass = t.success ? 'success' : 'error';
+            const duration = Math.round(t.duration_ms);
             html += `
-                <div class="trace-item ${active}" onclick="selectTrace('${t.id}')">
-                    <div class="flex items-baseline justify-between">
-                        <div class="font-semibold tracking-tight">${t.name}</div>
-                        ${status}
+                <div class="trace-item ${statusClass}" data-id="${t.id}">
+                    <input type="checkbox" 
+                           ${isSelected ? 'checked' : ''} 
+                           onchange="toggleTraceSelection('${t.id}', this.checked, event)">
+                    <div class="trace-info">
+                        <div class="trace-name">${t.name}</div>
+                        <div class="trace-meta">
+                            <span>${t.start.split('T')[0]}</span>
+                            <span>${duration}ms</span>
+                            <span>${t.total_tokens}t</span>
+                        </div>
                     </div>
-                    <div class="trace-meta flex justify-between mt-2">
-                        <div>${t.id.substring(0, 8)}</div>
-                        <div>${time}</div>
-                    </div>
-                    <div class="text-xs text-gray-500 mt-3">
-                        ${Math.round(t.duration_ms)}&nbsp;ms &nbsp;•&nbsp; ${t.total_tokens} tokens
-                    </div>
-                </div>
-            `;
+                </div>`;
         }
         container.innerHTML = html;
+
+        // Attach click handlers (checkbox already handled separately)
+        const items = container.querySelectorAll('.trace-item');
+        items.forEach(item => {
+            const id = item.dataset.id;
+            item.addEventListener('click', (e) => {
+                if (e.target.type !== 'checkbox') {
+                    if (!compareMode) {
+                        loadTrace(id);
+                    } else {
+                        // In compare mode a click can still load single but we ignore for now
+                    }
+                }
+            });
+        });
     } catch (err) {
-        console.error('loadTraces failed', err);
+        console.error(err);
     }
 }
 
-/**
- * Select a trace by ID, fetch its graph data and render the SVG.
- */
-async function selectTrace(traceId) {
+function toggleTraceSelection(id, checked, e) {
+    e.stopImmediatePropagation();
+    if (checked) {
+        if (selectedTraceIds.length >= 2) {
+            // uncheck the box we just clicked
+            e.target.checked = false;
+            return;
+        }
+        selectedTraceIds.push(id);
+    } else {
+        selectedTraceIds = selectedTraceIds.filter(x => x !== id);
+    }
+    updateCompareButton();
+}
+
+function updateCompareButton() {
+    const btn = document.getElementById('compare-btn');
+    if (btn) {
+        btn.disabled = selectedTraceIds.length !== 2;
+    }
+}
+
+function filterTraces() {
+    const input = document.getElementById('search-input');
+    loadTraces(input ? input.value : '');
+}
+
+async function loadTrace(traceId) {
+    if (compareMode) return;
     currentTraceId = traceId;
-    await loadTraces(); // refresh active state
-
     try {
-        const res = await fetch(`${API_BASE}/traces/${traceId}/graph`);
-        if (!res.ok) {
-            if (res.status === 404) throw new Error('Trace not found');
-            throw new Error('Failed to load graph');
-        }
-        const rootStep = await res.json();
-        currentRootStep = rootStep;
-        renderGraph(rootStep);
-
-        // Reset inspector
-        const inspector = document.getElementById('inspector-content');
-        if (inspector) {
-            inspector.innerHTML = `
-                <div class="flex flex-col justify-center items-center h-80 text-center opacity-40">
-                    <div class="w-9 h-9 border border-current rounded mb-6"></div>
-                    <div class="text-sm font-medium">NODE INSPECTOR</div>
-                    <div class="text-xs mt-8 max-w-[160px]">Click any node in the graph to view raw prompts, responses, tool outputs and metadata</div>
-                </div>
-            `;
-        }
+        const res = await fetch(`${API_BASE}/traces/${traceId}`);
+        if (!res.ok) throw new Error('Trace not found');
+        const trace = await res.json();
+        
+        currentRootStep = trace.root_step;
+        document.getElementById('trace-title').textContent = trace.name;
+        
+        const meta = document.getElementById('trace-meta');
+        meta.innerHTML = `
+            ${trace.start.split('T')[0]} &nbsp;·&nbsp; 
+            ${Math.round(trace.duration * 1000)} ms &nbsp;·&nbsp; 
+            ${trace.total_tokens} tokens
+        `;
+        
+        document.getElementById('inspector-trace-id').textContent = traceId.substring(0, 8);
+        
+        renderGraph('graph-container', currentRootStep, (step) => {
+            showInspector(step, trace);
+        });
+        
+        // connect live WS if the trace is recent
+        connectLiveWS(traceId);
     } catch (e) {
         console.error(e);
-        const container = document.getElementById('graph-container');
-        if (container) container.innerHTML = `<div class="text-red-600 p-8">Could not load trace graph.</div>`;
     }
 }
 
-/**
- * Render interactive SVG node-link diagram using strict hierarchical grid layout.
- * Nodes are positioned with even spacing per subtree. Supports click to inspect.
- */
-function renderGraph(root) {
-    const container = document.getElementById('graph-container');
+function renderGraph(containerId, rootStep, onNodeClick) {
+    const container = document.getElementById(containerId);
     if (!container) return;
+    
+    // Clear previous content
     container.innerHTML = '';
-
-    if (!root) {
-        container.innerHTML = `<div class="p-12 text-red-500">No graph data available</div>`;
-        return;
+    
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("width", "780");
+    svg.setAttribute("height", "620");
+    svg.setAttribute("viewBox", "0 0 780 620");
+    svg.setAttribute("class", "trace-svg");
+    
+    let yOffset = 40;
+    const xBase = 40;
+    const xStep = 210;
+    
+    function getNodeColor(kind) {
+        if (kind === 'llm') return '#3b82f6';
+        if (kind === 'tool') return '#10b981';
+        if (kind === 'error') return '#e30613';
+        if (kind === 'trace') return '#6b7280';
+        return '#64748b';
     }
-
-    const SVG_W = 920;
-    const SVG_H = 640;
-    const LEVEL_GAP = 118;
-    const NODE_W = 152;
-    const NODE_H = 64;
-
-    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    svg.setAttribute('width', SVG_W);
-    svg.setAttribute('height', SVG_H);
-    svg.setAttribute('viewBox', `0 0 ${SVG_W} ${SVG_H}`);
-    svg.setAttribute('class', 'shadow-none');
-
-    const positions = new Map();
-
-    // Recursive layout: center children under parent with even horizontal spread
-    function layout(step, depth = 0, centerX = SVG_W / 2, availWidth = SVG_W * 0.82) {
-        const y = 68 + depth * LEVEL_GAP;
-        positions.set(step.id, { x: centerX, y, step });
-
-        const kids = step.children || [];
-        if (kids.length === 0) return;
-
-        const childWidth = availWidth / Math.max(kids.length, 1);
-        const startX = centerX - (availWidth / 2) + (childWidth / 2);
-
-        for (let i = 0; i < kids.length; i++) {
-            const childX = startX + i * childWidth;
-            layout(kids[i], depth + 1, childX, childWidth * 0.92);
-        }
-    }
-
-    layout(root);
-
-    // Draw connecting edges first (so they sit behind nodes)
-    function drawEdges(step) {
-        const p = positions.get(step.id);
-        if (!p) return;
-
-        const children = step.children || [];
-        for (const child of children) {
-            const cp = positions.get(child.id);
-            if (!cp) continue;
-
-            const x1 = p.x;
-            const y1 = p.y + NODE_H / 2;
-            const x2 = cp.x;
-            const y2 = cp.y - NODE_H / 2 - 6;
-
-            const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-            line.setAttribute('x1', String(x1));
-            line.setAttribute('y1', String(y1));
-            line.setAttribute('x2', String(x2));
-            line.setAttribute('y2', String(y2));
-            line.setAttribute('class', 'edge');
+    
+    function drawStep(step, depth, parentY = null) {
+        const x = xBase + depth * xStep;
+        const y = yOffset;
+        const width = 168;
+        const height = 68;
+        const color = getNodeColor(step.kind);
+        
+        // connector line from parent
+        if (parentY !== null) {
+            const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+            line.setAttribute("x1", (x - 22).toString());
+            line.setAttribute("y1", (parentY + height / 2).toString());
+            line.setAttribute("x2", x.toString());
+            line.setAttribute("y2", (y + height / 2).toString());
+            line.setAttribute("stroke", "#ddd");
+            line.setAttribute("stroke-width", "2");
             svg.appendChild(line);
-
-            drawEdges(child);
+        }
+        
+        // node rectangle
+        const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+        rect.setAttribute("x", x.toString());
+        rect.setAttribute("y", y.toString());
+        rect.setAttribute("width", width.toString());
+        rect.setAttribute("height", height.toString());
+        rect.setAttribute("rx", "6");
+        rect.setAttribute("fill", color);
+        rect.setAttribute("stroke", "#111");
+        rect.setAttribute("stroke-width", "1.5");
+        rect.setAttribute("class", "node");
+        rect.onclick = () => onNodeClick(step);
+        svg.appendChild(rect);
+        
+        // name
+        const nameText = document.createElementNS("http://www.w3.org/2000/svg", "text");
+        nameText.setAttribute("x", (x + 12).toString());
+        nameText.setAttribute("y", (y + 24).toString());
+        nameText.setAttribute("fill", "#ffffff");
+        nameText.setAttribute("font-size", "13");
+        nameText.setAttribute("font-weight", "600");
+        nameText.textContent = step.name.length > 18 
+            ? step.name.substring(0, 17) + '…' 
+            : step.name;
+        svg.appendChild(nameText);
+        
+        // kind
+        const kindText = document.createElementNS("http://www.w3.org/2000/svg", "text");
+        kindText.setAttribute("x", (x + width - 34).toString());
+        kindText.setAttribute("y", (y + 18).toString());
+        kindText.setAttribute("fill", "#ffffff");
+        kindText.setAttribute("font-size", "9");
+        kindText.setAttribute("font-weight", "700");
+        kindText.textContent = step.kind.toUpperCase();
+        svg.appendChild(kindText);
+        
+        // duration
+        const durText = document.createElementNS("http://www.w3.org/2000/svg", "text");
+        durText.setAttribute("x", (x + 12).toString());
+        durText.setAttribute("y", (y + 52).toString());
+        durText.setAttribute("fill", "#e0f0ff");
+        durText.setAttribute("font-size", "11");
+        durText.textContent = `${step.duration_ms} ms`;
+        svg.appendChild(durText);
+        
+        const currentY = y;
+        yOffset += 92; // vertical spacing for next sibling
+        
+        if (step.children && step.children.length > 0) {
+            step.children.forEach(child => {
+                drawStep(child, depth + 1, currentY);
+            });
         }
     }
-    drawEdges(root);
-
-    // Draw nodes with labels
-    function drawNodes(step) {
-        const pos = positions.get(step.id);
-        if (!pos) return;
-
-        const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-        g.setAttribute('data-id', step.id);
-        g.style.cursor = 'pointer';
-
-        const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-        const rx = pos.x - NODE_W / 2;
-        const ry = pos.y - NODE_H / 2;
-        rect.setAttribute('x', String(rx));
-        rect.setAttribute('y', String(ry));
-        rect.setAttribute('width', String(NODE_W));
-        rect.setAttribute('height', String(NODE_H));
-        rect.setAttribute('rx', '3');
-        rect.setAttribute('class', `node node-${step.kind || 'step'}`);
-        g.appendChild(rect);
-
-        // Primary label
-        const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-        label.setAttribute('x', String(pos.x));
-        label.setAttribute('y', String(pos.y - 6));
-        label.setAttribute('class', 'text-label');
-        let name = step.name || 'Step';
-        if (name.length > 19) name = name.substring(0, 16) + '…';
-        label.textContent = name;
-        g.appendChild(label);
-
-        // Kind indicator
-        const kindEl = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-        kindEl.setAttribute('x', String(pos.x));
-        kindEl.setAttribute('y', String(pos.y + 19));
-        kindEl.setAttribute('class', 'text-kind');
-        kindEl.textContent = (step.kind || 'STEP').toUpperCase();
-        g.appendChild(kindEl);
-
-        // Click handler
-        g.addEventListener('click', (ev) => {
-            ev.stopImmediatePropagation();
-            onNodeClick(step.id);
-        });
-
-        svg.appendChild(g);
-
-        // Recurse into children
-        for (const child of (step.children || [])) {
-            drawNodes(child);
-        }
-    }
-
-    drawNodes(root);
-
-    // Trace title at top of diagram
-    const title = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-    title.setAttribute('x', String(SVG_W / 2));
-    title.setAttribute('y', '34');
-    title.setAttribute('text-anchor', 'middle');
-    title.setAttribute('fill', '#111111');
-    title.setAttribute('font-size', '17');
-    title.setAttribute('font-weight', '600');
-    title.setAttribute('letter-spacing', '-0.02em');
-    title.textContent = root.name || 'Workflow Trace';
+    
+    drawStep(rootStep, 0);
+    
+    // title label
+    const title = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    title.setAttribute("x", "20");
+    title.setAttribute("y", "22");
+    title.setAttribute("fill", "#444");
+    title.setAttribute("font-size", "12");
+    title.setAttribute("font-weight", "500");
+    title.textContent = "EXECUTION TRACE";
     svg.appendChild(title);
-
+    
     container.appendChild(svg);
 }
 
-/**
- * Find a step by ID in the tree and display rich metadata in the inspector.
- */
-function onNodeClick(stepId) {
-    if (!currentRootStep) return;
-    selectedStepId = stepId;
-
-    function find(node) {
-        if (node.id === stepId) return node;
-        for (const c of (node.children || [])) {
-            const found = find(c);
-            if (found) return found;
+function showInspector(step, traceOrComparison) {
+    selectedStepId = step.id;
+    const content = document.getElementById('inspector-content');
+    let html = `<div class="inspector-section">`;
+    html += `<h4>${step.name} <span style="font-size:10px;color:#888">(${step.kind})</span></h4>`;
+    html += `<div><strong>Duration:</strong> ${step.duration_ms} ms</div>`;
+    
+    if (step.content) {
+        const c = step.content;
+        if (c.prompt) {
+            html += `<div class="inspector-section"><h4>Prompt</h4><pre>${escapeHtml(c.prompt)}</pre></div>`;
         }
-        return null;
+        if (c.response) {
+            html += `<div class="inspector-section"><h4>Response</h4><pre>${escapeHtml(c.response)}</pre></div>`;
+        }
+        if (c.tokens) {
+            html += `<div><strong>Tokens:</strong> ${c.tokens}</div>`;
+        }
+        if (c.arguments) {
+            html += `<div class="inspector-section"><h4>Arguments</h4><pre>${JSON.stringify(c.arguments, null, 2)}</pre></div>`;
+        }
+        if (c.output) {
+            html += `<div class="inspector-section"><h4>Output</h4><pre>${escapeHtml(typeof c.output === 'string' ? c.output : JSON.stringify(c.output))}</pre></div>`;
+        }
+        if (c.error) {
+            html += `<div style="color:#e30613"><strong>Error:</strong> ${escapeHtml(c.error)}</div>`;
+        }
     }
+    
+    html += `</div>`;
+    content.innerHTML = html;
+    
+    // highlight which side if in compare mode
+    if (compareMode && currentComparison) {
+        document.getElementById('inspector-trace-id').innerHTML = 
+            `<span style="background:#3b82f6;color:white;padding:1px 5px;border-radius:2px;font-size:10px">` + 
+            (currentInspectorSide === 'left' ? 'LEFT' : 'RIGHT') + `</span>`;
+    }
+}
 
-    const step = find(currentRootStep);
-    if (!step) return;
+function escapeHtml(unsafe) {
+    return unsafe
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
 
-    const inspector = document.getElementById('inspector-content');
-    if (!inspector) return;
+function toggleCompareMode() {
+    if (selectedTraceIds.length !== 2) return;
+    compareMode = true;
+    document.getElementById('single-view').classList.add('hidden');
+    document.getElementById('compare-view').classList.remove('hidden');
+    document.getElementById('compare-btn').classList.add('hidden');
+    document.getElementById('exit-compare-btn').classList.remove('hidden');
+    loadComparison(selectedTraceIds[0], selectedTraceIds[1]);
+}
 
-    const content = step.content || {};
-    let html = `
-        <div class="mb-8">
-            <span onclick="window.loadTraces()" class="inline-flex items-center gap-2 px-5 py-1.5 bg-black text-white text-xs font-medium cursor-pointer hover:bg-zinc-800">
-                ← BACK TO LIST
-            </span>
+async function loadComparison(id1, id2) {
+    try {
+        const res = await fetch(`${API_BASE}/compare/${id1}/${id2}`);
+        if (!res.ok) throw new Error('Failed to load comparison');
+        currentComparison = await res.json();
+        
+        // populate headers
+        document.getElementById('left-header').textContent = 
+            `${currentComparison.trace1.name} (${currentComparison.trace1.id.substring(0,8)})`;
+        document.getElementById('right-header').textContent = 
+            `${currentComparison.trace2.name} (${currentComparison.trace2.id.substring(0,8)})`;
+        
+        // render left graph
+        renderGraph('left-graph-container', currentComparison.trace1.root_step, (step) => {
+            currentInspectorSide = 'left';
+            showInspector(step, currentComparison.trace1);
+        });
+        
+        // render right graph
+        renderGraph('right-graph-container', currentComparison.trace2.root_step, (step) => {
+            currentInspectorSide = 'right';
+            showInspector(step, currentComparison.trace2);
+        });
+        
+        // populate stats
+        const leftStats = document.getElementById('left-stats');
+        const rightStats = document.getElementById('right-stats');
+        leftStats.innerHTML = `
+            ${Math.round(currentComparison.trace1.duration * 1000)} ms &nbsp; 
+            ${currentComparison.trace1.total_tokens} tokens
+        `;
+        rightStats.innerHTML = `
+            ${Math.round(currentComparison.trace2.duration * 1000)} ms &nbsp; 
+            ${currentComparison.trace2.total_tokens} tokens
+        `;
+        
+        // differences
+        renderDifferences(currentComparison.differences);
+        
+    } catch (err) {
+        console.error('Comparison load failed', err);
+    }
+}
+
+function renderDifferences(diff) {
+    const container = document.getElementById('diff-content');
+    let html = '';
+    
+    html += `
+        <div class="diff-item">
+            <strong>Duration Δ</strong>
+            <div style="font-size:15px;font-weight:600;color:${diff.duration_diff > 0.3 ? '#e30613' : '#10b981'}">
+                ${diff.duration_diff}s
+            </div>
         </div>
-
-        <div class="flex items-center gap-x-3 mb-4">
-            <span class="px-4 py-1 text-[10px] font-mono tracking-widest border border-current">${(step.kind || 'step').toUpperCase()}</span>
-            <span class="font-mono text-xs text-gray-400">${step.id.substring(0, 8)}</span>
+        <div class="diff-item">
+            <strong>Tokens Δ</strong>
+            <div style="font-size:15px;font-weight:600">
+                ${diff.token_diff}
+            </div>
         </div>
-
-        <h2 class="text-[27px] leading-none font-semibold tracking-tighter mb-7">${step.name}</h2>
+        <div class="diff-item">
+            <strong>Steps Δ</strong>
+            <div style="font-size:15px;font-weight:600">
+                ${diff.step_count_diff}
+            </div>
+        </div>
+        <div class="diff-item">
+            <strong>Success match</strong>
+            <div style="font-size:15px;font-weight:600;color:${diff.success_match ? '#10b981' : '#e30613'}">
+                ${diff.success_match ? 'YES' : 'NO'}
+            </div>
+        </div>
     `;
-
-    if (step.duration_ms) {
-        html += `
-            <div class="metadata-row">
-                <div class="metadata-label">DURATION</div>
-                <div class="font-medium">${step.duration_ms} ms</div>
-            </div>
-        `;
-    }
-
-    if (step.kind === 'llm') {
-        html += `
-            <div class="mt-10">
-                <div class="panel-title">PROMPT</div>
-                <pre>${escapeHtml(content.prompt || '(no prompt)')}</pre>
-            </div>
-
-            <div class="mt-10">
-                <div class="panel-title">RESPONSE</div>
-                <pre>${escapeHtml(content.response || '(no response)')}</pre>
-            </div>
-
-            <div class="hairline"></div>
-
-            <div class="grid grid-cols-2 gap-x-8 text-sm">
-                <div>
-                    <span class="metadata-label">TOKENS</span>
-                    <div class="font-semibold text-xl mt-1">${content.tokens || 0}</div>
-                </div>
-                ${content.latency_ms ? `
-                <div>
-                    <span class="metadata-label">LATENCY</span>
-                    <div class="font-semibold text-xl mt-1">${content.latency_ms} ms</div>
-                </div>` : ''}
-            </div>
-        `;
-    } else if (step.kind === 'tool') {
-        html += `
-            <div class="mt-10">
-                <div class="panel-title">ARGUMENTS</div>
-                <pre>${escapeHtml(JSON.stringify(content.arguments || content.args || {}, null, 2))}</pre>
-            </div>
-            <div class="mt-10">
-                <div class="panel-title">OUTPUT</div>
-                <pre>${escapeHtml(JSON.stringify(content.output || content.result || {}, null, 2))}</pre>
-            </div>
-        `;
-    } else if (Object.keys(content).length > 0) {
-        html += `
-            <div class="mt-10">
-                <div class="panel-title">METADATA</div>
-                <pre>${escapeHtml(JSON.stringify(content, null, 2))}</pre>
-            </div>
-        `;
-    } else {
-        html += `<div class="mt-16 text-xs text-gray-400 italic">No additional data attached to this step.</div>`;
-    }
-
-    inspector.innerHTML = html;
+    
+    container.innerHTML = html;
 }
 
-function escapeHtml(text) {
-    if (typeof text !== 'string') return String(text);
-    return text
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#039;');
-}
-
-/** Initialize everything on page load */
-function init() {
+function exitComparison() {
+    compareMode = false;
+    selectedTraceIds = [];
+    currentComparison = null;
+    document.getElementById('single-view').classList.remove('hidden');
+    document.getElementById('compare-view').classList.add('hidden');
+    document.getElementById('compare-btn').classList.remove('hidden');
+    document.getElementById('exit-compare-btn').classList.add('hidden');
+    document.getElementById('compare-btn').disabled = true;
     loadTraces();
+    if (currentTraceId) loadTrace(currentTraceId);
+}
 
-    // Periodic refresh when no trace is selected
-    setInterval(() => {
-        if (!currentTraceId) loadTraces();
-    }, 7000);
+async function clearAllTraces() {
+    if (!confirm('Delete ALL traces?')) return;
+    try {
+        await fetch(`${API_BASE}/traces/clear`, { method: 'POST' }); // note: CLI uses this path indirectly
+        loadTraces();
+        document.getElementById('inspector-content').innerHTML = `
+            <div class="empty-inspector">All traces cleared.<br><br>Run an agent to generate new data.</div>
+        `;
+    } catch (e) {}
+}
 
-    // Keyboard support
-    document.addEventListener('keydown', (e) => {
-        if (e.key === '/' && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA') {
-            e.preventDefault();
-            loadTraces();
+function connectLiveWS(traceId) {
+    if (ws) ws.close();
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const host = window.location.host;
+    ws = new WebSocket(`${protocol}//${host}/api/ws/traces/${traceId}`);
+    
+    ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'trace_update' && msg.root_step) {
+            currentRootStep = msg.root_step;
+            if (!compareMode) {
+                renderGraph('graph-container', currentRootStep, (step) => {
+                    showInspector(step, {root_step: currentRootStep});
+                });
+            }
+        }
+    };
+    
+    ws.onclose = () => { ws = null; };
+}
+
+/* Initialize on load */
+window.onload = function() {
+    loadTraces();
+    
+    // keyboard shortcut for comparison exit
+    document.addEventListener('keydown', function(e) {
+        if (e.key === "Escape" && compareMode) {
+            exitComparison();
         }
     });
-
-    console.log('%cFlowTrace UI ready — Swiss minimal style', 'color:#e30613;font-family:monospace;font-size:10px');
-}
-
-// Public API for inline event handlers and HTMX patterns
-window.loadTraces = loadTraces;
-window.selectTrace = selectTrace;
-window.renderGraph = renderGraph;
-window.onNodeClick = onNodeClick;
-
-window.onload = init;
+    
+    // make sure compare button starts disabled
+    updateCompareButton();
+};

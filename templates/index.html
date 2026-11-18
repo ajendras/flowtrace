@@ -4,739 +4,99 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FlowTrace</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js"></script>
     <link rel="stylesheet" href="/static/styles.css">
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=Space+Grotesk:wght@500;600&amp;display=swap');
-        
-        :root {
-            --accent: #e30613;
-        }
-        
-        .tail-container {
-            font-family: 'Inter', system_ui, sans-serif;
-        }
-        
-        .logo-font {
-            font-family: 'Space Grotesk', sans-serif;
-        }
-
-        .hairline {
-            border-bottom: 1px solid #e5e5e5;
-        }
-
-        .graph-node {
-            cursor: pointer;
-            transition: fill 0.1s cubic-bezier(0.4, 0, 0.2, 1);
-        }
-        
-        .graph-node:hover {
-            filter: brightness(0.92);
-        }
-        
-        .node-label {
-            font-size: 11px;
-            font-weight: 500;
-            pointer-events: none;
-            user-select: none;
-        }
-
-        .trace-item {
-            transition: all 0.1s cubic-bezier(0.4, 0.0, 0.2, 1);
-        }
-        
-        .trace-item:hover {
-            background-color: #fafafa;
-        }
-        
-        .trace-item-active {
-            background-color: #fff1f0;
-            border-left: 3px solid #e30613;
-        }
-
-        svg text {
-            font-family: 'Inter', system_ui, sans-serif;
-        }
-    </style>
+    <script src="/static/script.js" defer></script>
 </head>
-<body class="tail-container bg-white text-[#111111] antialiased">
-    <div class="flex flex-col h-screen">
+<body>
+    <div class="app">
         <!-- Header -->
-        <header class="h-14 border-b border-[#111111] flex items-center px-8 justify-between bg-white z-10">
-            <div class="flex items-center gap-x-3">
-                <!-- Accent square -->
-                <div class="w-5 h-5 bg-[#e30613] flex items-center justify-center text-[10px] leading-none text-white font-bold logo-font">F</div>
-                <div>
-                    <span class="logo-font text-2xl font-semibold tracking-[-1px]">FLOW</span>
-                    <span class="logo-font text-2xl font-semibold tracking-[-1px] text-[#e30613]">TRACE</span>
-                </div>
+        <header class="header">
+            <div class="logo-container">
+                <span class="logo">FlowTrace</span>
+                <span class="version">v0.1.0</span>
             </div>
-            
-            <div class="flex items-center gap-x-8 text-sm">
-                <div onclick="loadTraces()" 
-                     class="flex items-center gap-x-1.5 cursor-pointer hover:text-[#e30613] transition-colors">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.058 11H1M12 3v2m0 16v2m9-9H15m-6 0H3" />
-                    </svg>
-                    <span class="font-medium">Refresh</span>
-                </div>
-                
-                <div onclick="clearDatabase()" 
-                     class="flex items-center gap-x-1.5 text-[#e30613] hover:text-red-700 cursor-pointer transition-colors">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.595 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.595-1.858L5 7" />
-                    </svg>
-                    <span class="font-medium">Clear</span>
-                </div>
-                
-                <a href="https://github.com/flowtrace/flowtrace" target="_blank"
-                   class="text-xs tracking-widest font-mono border border-[#111111] px-3 py-1 hover:bg-[#111111] hover:text-white transition-colors">
-                    v0.1.0
-                </a>
+            <div class="header-controls">
+                <button onclick="toggleCompareMode()" id="compare-btn" class="btn btn-primary" disabled>
+                    Compare
+                </button>
+                <button onclick="exitComparison()" id="exit-compare-btn" class="btn hidden">
+                    Single View
+                </button>
+                <button onclick="clearAllTraces()" class="btn">Clear All</button>
             </div>
         </header>
 
-        <div class="flex flex-1 overflow-hidden">
-            <!-- Traces sidebar -->
-            <div class="w-72 border-r border-[#111111] bg-white flex flex-col">
-                <div class="px-6 pt-6 pb-3">
-                    <div class="flex items-center justify-between">
-                        <div class="uppercase text-[10px] font-semibold tracking-[0.5px] text-[#111111]">Traces</div>
-                        <button onclick="showNewTraceModal()" 
-                                class="text-[#e30613] text-xs font-medium flex items-center gap-x-1 hover:underline">
-                            <span class="text-base leading-none">+</span>
-                            <span>NEW</span>
-                        </button>
-                    </div>
+        <div class="content">
+            <!-- Sidebar -->
+            <aside class="sidebar">
+                <div class="sidebar-header">
+                    <h2>Traces</h2>
+                    <input type="text" id="search-input" placeholder="Filter traces..." onkeyup="filterTraces()">
                 </div>
-                
-                <div id="trace-list" class="flex-1 overflow-auto px-3 space-y-0.5 text-sm">
-                    <!-- Populated by JS -->
-                </div>
-                
-                <div class="p-4 border-t border-[#111111] text-[10px] text-neutral-400 font-mono">
-                    LOCAL • SQLITE
-                </div>
-            </div>
+                <div id="traces-list" class="trace-list"></div>
+            </aside>
 
-            <!-- Main graph area -->
-            <div class="flex-1 flex flex-col">
-                <!-- Trace header -->
-                <div class="h-14 border-b border-[#111111] px-8 flex items-center justify-between bg-white">
-                    <div class="flex items-center gap-x-4">
-                        <div id="trace-status" 
-                             class="w-2 h-2 rounded-full bg-emerald-400"></div>
-                        <div>
-                            <span id="active-trace-name" class="font-semibold text-lg">No trace selected</span>
-                        </div>
+            <!-- Main area -->
+            <main class="main-area">
+                <!-- Single view -->
+                <div id="single-view">
+                    <div class="view-header">
+                        <h1 id="trace-title">Select a trace</h1>
+                        <div id="trace-meta" class="meta"></div>
                     </div>
-                    
-                    <div class="flex items-center gap-x-6 text-xs uppercase tracking-widest font-medium">
-                        <div onclick="exportTrace()" 
-                             class="cursor-pointer hover:text-[#e30613] flex items-center gap-x-2">
-                            <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17l4-4m0 0l-4-4m4 4V3m-4 4V3" />
-                            </svg>
-                            <span>EXPORT</span>
-                        </div>
-                        <div onclick="replayTrace()" 
-                             class="cursor-pointer hover:text-[#e30613] flex items-center gap-x-2">
-                            <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132z" />
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 4.01V8" />
-                            </svg>
-                            <span>REPLAY</span>
-                        </div>
+                    <div class="graph-panel">
+                        <div id="graph-container" class="svg-container"></div>
                     </div>
                 </div>
-                
-                <!-- Graph canvas -->
-                <div class="flex-1 p-8 bg-[#fafafa] flex items-center justify-center overflow-hidden relative" id="graph-container">
-                    <svg id="graph-svg" width="820" height="520" 
-                         class="bg-white shadow-none border border-[#eeeeee] max-w-full max-h-full"
-                         style="box-shadow: none;"></svg>
-                    
-                    <!-- Empty state -->
-                    <div id="empty-state" 
-                         class="absolute inset-0 flex flex-col items-center justify-center text-center px-12">
-                        <div class="w-16 h-16 border border-[#e30613] flex items-center justify-center mb-6">
-                            <span class="text-4xl text-[#e30613]/30">↝</span>
-                        </div>
-                        <div class="text-xl font-medium text-[#111111] mb-2">No trace loaded</div>
-                        <div class="max-w-xs text-neutral-400 text-sm">
-                            Run an agent with the <span class="font-mono text-[#e30613]">@trace</span> decorator 
-                            or select a trace from the sidebar.
-                        </div>
-                        <button onclick="loadDemoTrace()" 
-                                class="mt-8 border border-[#111111] text-xs tracking-widest px-8 py-3.5 hover:bg-[#111111] hover:text-white transition-all">
-                            LOAD DEMO TRACE
-                        </button>
-                    </div>
-                </div>
-                
-                <!-- Bottom status bar -->
-                <div class="h-9 bg-white border-t border-[#111111] px-6 text-[10px] flex items-center justify-between font-mono text-neutral-400">
-                    <div id="stats" class="flex items-center gap-x-6">
-                        <!-- populated by JS: tokens, steps, duration -->
-                    </div>
-                    <div class="flex items-center gap-x-5">
-                        <div onclick="window.location.reload()" class="cursor-pointer hover:text-black">RESET VIEW</div>
-                    </div>
-                </div>
-            </div>
 
-            <!-- Inspector panel -->
-            <div class="w-80 border-l border-[#111111] bg-white flex flex-col">
-                <div class="px-6 h-14 border-b border-[#111111] flex items-center uppercase text-xs font-semibold tracking-widest">
-                    Inspector
-                </div>
-                
-                <div id="inspector-placeholder" class="flex-1 flex flex-col items-center justify-center px-10 text-center">
-                    <div class="text-5xl mb-6 text-[#e30613]/10">→</div>
-                    <div class="font-medium text-sm mb-1">Click any node</div>
-                    <div class="text-neutral-400 text-xs leading-snug">
-                        Select a step in the execution graph to view prompts, tool outputs, 
-                        timing and metadata.
+                <!-- Compare view (hidden by default) -->
+                <div id="compare-view" class="hidden">
+                    <div class="view-header">
+                        <h1>Trace Comparison</h1>
+                        <div class="meta compare-meta">
+                            <span id="compare-meta-left"></span>
+                            <span class="vs">vs</span>
+                            <span id="compare-meta-right"></span>
+                        </div>
                     </div>
-                </div>
-                
-                <div id="inspector-content" class="flex-1 overflow-auto hidden">
-                    <!-- Dynamically populated by renderInspector() in script.js -->
-                </div>
-                
-                <div class="p-4 border-t border-[#111111]">
-                    <div onclick="copyNodeToClipboard()" 
-                         class="text-center text-[#e30613] text-xs font-medium cursor-pointer hover:underline">
-                        COPY TO CLIPBOARD
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- New trace / demo modal -->
-    <div onclick="if(event.target.id === 'modal-backdrop') hideModal()" id="modal-backdrop"
-         class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-        <div onclick="event.stopImmediatePropagation()" 
-             class="bg-white w-full max-w-md mx-4 border border-[#111111]">
-            <div class="px-6 py-5 border-b text-sm font-semibold">Quick Demo</div>
-            
-            <div class="p-6 space-y-6">
-                <div class="text-xs leading-relaxed text-neutral-500">
-                    This will create and display a synthetic research-agent trace 
-                    containing LLM calls, tool uses, and nested steps.
-                </div>
-                
-                <div class="grid grid-cols-2 gap-3 text-xs">
-                    <button onclick="hideModal(); loadDemoTrace()" 
-                            class="border border-[#111111] py-4 font-medium hover:bg-neutral-50">
-                        USE DEMO
-                    </button>
-                    <button onclick="hideModal()" 
-                            class="bg-[#111111] text-white py-4 font-medium">
-                        CANCEL
-                    </button>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <script>
-        // Tailwind script configuration
-        function initializeTailwind() {
-            tailwind.config = {
-                content: [],
-                theme: {
-                    extend: {
-                        colors: {
-                            accent: '#e30613'
-                        }
-                    }
-                }
-            }
-        }
-        
-        // Global state
-        let currentTraceId = null;
-        let currentTraceData = null;
-        let selectedNodeId = null;
-        
-        // Simple SVG graph renderer (grid-based tree layout)
-        function renderGraph(rootStep) {
-            const svg = document.getElementById('graph-svg');
-            svg.innerHTML = '';
-            
-            // Background grid (very light)
-            const grid = document.createElementNS("http://www.w3.org/2000/svg", "defs");
-            const pattern = document.createElementNS("http://www.w3.org/2000/svg", "pattern");
-            pattern.setAttribute("id", "grid");
-            pattern.setAttribute("width", "32");
-            pattern.setAttribute("height", "32");
-            pattern.setAttribute("patternUnits", "userSpaceOnUse");
-            
-            const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-            path.setAttribute("d", "M 32 0 L 0 0 0 32");
-            path.setAttribute("fill", "none");
-            path.setAttribute("stroke", "#f3f3f3");
-            path.setAttribute("stroke-width", "1");
-            pattern.appendChild(path);
-            grid.appendChild(pattern);
-            svg.appendChild(grid);
-            
-            const bgRect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-            bgRect.setAttribute("width", "100%");
-            bgRect.setAttribute("height", "100%");
-            bgRect.setAttribute("fill", "url(#grid)");
-            svg.appendChild(bgRect);
-            
-            if (!rootStep) return;
-            
-            // Very simple layered tree layout (strict columns)
-            const layers = [];
-            function buildLayers(node, depth = 0) {
-                if (!layers[depth]) layers[depth] = [];
-                layers[depth].push(node);
-                node.children.forEach(child => buildLayers(child, depth + 1));
-            }
-            buildLayers(rootStep);
-            
-            const layerWidth = 160;
-            const nodeHeight = 54;
-            const startX = 60;
-            
-            const nodesById = {};
-            
-            layers.forEach((layerNodes, layerIndex) => {
-                const yStart = 60 + (layerNodes.length > 1 ? (520 - (layerNodes.length * (nodeHeight + 30))) / 2 : 180);
-                
-                layerNodes.forEach((node, idx) => {
-                    const x = startX + layerIndex * layerWidth;
-                    const y = yStart + idx * (nodeHeight + 42);
                     
-                    // Node rectangle
-                    const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-                    rect.setAttribute("x", x);
-                    rect.setAttribute("y", y);
-                    rect.setAttribute("width", "132");
-                    rect.setAttribute("height", "46");
-                    rect.setAttribute("rx", "2");
-                    rect.setAttribute("fill", node.kind === "llm" ? "#fff1f0" : "#f8f8f8");
-                    rect.setAttribute("stroke", node.kind === "llm" ? "#e30613" : "#111111");
-                    rect.setAttribute("stroke-width", node.kind === "llm" ? "2" : "1.5");
-                    rect.setAttribute("class", "graph-node");
-                    rect.setAttribute("data-node-id", node.id);
-                    rect.onclick = () => onNodeClick(node.id);
-                    svg.appendChild(rect);
-                    
-                    // Icon
-                    let iconText = "●";
-                    if (node.kind === "llm") iconText = "L";
-                    else if (node.kind === "tool") iconText = "⚒";
-                    else if (node.kind === "trace") iconText = "◉";
-                    
-                    const icon = document.createElementNS("http://www.w3.org/2000/svg", "text");
-                    icon.setAttribute("x", x + 18);
-                    icon.setAttribute("y", y + 27);
-                    icon.setAttribute("fill", node.kind === "llm" ? "#e30613" : "#111111");
-                    icon.setAttribute("font-size", "13");
-                    icon.setAttribute("font-weight", "700");
-                    icon.setAttribute("text-anchor", "middle");
-                    icon.textContent = iconText;
-                    svg.appendChild(icon);
-                    
-                    // Label
-                    const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
-                    label.setAttribute("x", x + 52);
-                    label.setAttribute("y", y + 19);
-                    label.setAttribute("fill", "#111111");
-                    label.setAttribute("font-size", "11");
-                    label.setAttribute("font-weight", "600");
-                    label.textContent = node.name.length > 14 ? node.name.substring(0, 13) + "…" : node.name;
-                    svg.appendChild(label);
-                    
-                    // Duration
-                    const duration = document.createElementNS("http://www.w3.org/2000/svg", "text");
-                    duration.setAttribute("x", x + 52);
-                    duration.setAttribute("y", y + 34);
-                    duration.setAttribute("fill", "#777777");
-                    duration.setAttribute("font-size", "9");
-                    duration.textContent = `${node.duration_ms}ms`;
-                    svg.appendChild(duration);
-                    
-                    nodesById[node.id] = { x: x + 132, y: y + 23, node };
-                    
-                    // Edge to parent (simple)
-                    if (layerIndex > 0) {
-                        const parentX = x - layerWidth + 20;
-                        const parentY = y + 10; // approximate
+                    <div class="split-container">
+                        <!-- Left panel -->
+                        <div class="panel">
+                            <div class="panel-header" id="left-header">Trace 1</div>
+                            <div id="left-graph-container" class="svg-container"></div>
+                            <div class="panel-stats" id="left-stats"></div>
+                        </div>
                         
-                        const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-                        line.setAttribute("x1", parentX);
-                        line.setAttribute("y1", parentY);
-                        line.setAttribute("x2", x);
-                        line.setAttribute("y2", y + 23);
-                        line.setAttribute("stroke", "#ddd");
-                        line.setAttribute("stroke-width", "1.5");
-                        line.setAttribute("stroke-dasharray", "2,1");
-                        svg.appendChild(line);
-                    }
-                });
-            });
-            
-            // Store for click lookup
-            window.graphNodes = nodesById;
-            document.getElementById('empty-state').style.display = 'none';
-        }
-        
-        function onNodeClick(nodeId) {
-            selectedNodeId = nodeId;
-            const nodeData = findNodeById(currentTraceData, nodeId);
-            if (!nodeData) return;
-            renderInspector(nodeData);
-        }
-        
-        function findNodeById(root, id) {
-            if (!root) return null;
-            if (root.id === id) return root;
-            for (let child of (root.children || [])) {
-                const found = findNodeById(child, id);
-                if (found) return found;
-            }
-            return null;
-        }
-        
-        function renderInspector(node) {
-            const container = document.getElementById('inspector-content');
-            const placeholder = document.getElementById('inspector-placeholder');
-            
-            placeholder.classList.add('hidden');
-            container.classList.remove('hidden');
-            container.innerHTML = `
-                <div class="px-6 pt-6">
-                    <div class="flex justify-between items-start">
-                        <div>
-                            <div class="inline-flex items-center text-[10px] font-mono border border-[#e30613] text-[#e30613] px-2 py-px">${node.kind}</div>
-                            <div class="text-xl font-semibold mt-3 leading-none">${node.name}</div>
-                        </div>
-                        <div class="text-right">
-                            <div class="text-xs text-neutral-400">DURATION</div>
-                            <div class="font-mono text-3xl font-medium text-[#e30613]">${node.duration_ms}</div>
-                            <div class="text-[10px] text-neutral-400 -mt-1">ms</div>
+                        <!-- Right panel -->
+                        <div class="panel">
+                            <div class="panel-header" id="right-header">Trace 2</div>
+                            <div id="right-graph-container" class="svg-container"></div>
+                            <div class="panel-stats" id="right-stats"></div>
                         </div>
                     </div>
-                    
-                    <div class="hairline my-8"></div>
-                    
-                    <!-- Content -->
-                    <div class="mb-8">
-                        <div class="uppercase text-xs tracking-widest mb-3 font-medium">Content</div>
-                        <pre class="text-xs bg-neutral-50 p-4 font-mono overflow-auto max-h-56 text-neutral-600">${JSON.stringify(node.content || {}, null, 2)}</pre>
+
+                    <!-- Differences panel -->
+                    <div class="diff-panel" id="diff-panel">
+                        <h3>Differences</h3>
+                        <div id="diff-content"></div>
                     </div>
-                    
-                    <!-- If LLM specific fields -->
-                    ${node.kind === 'llm' && node.content.prompt ? `
-                    <div>
-                        <div class="flex items-center justify-between mb-3">
-                            <div class="uppercase text-xs tracking-widest font-medium">Prompt</div>
-                        </div>
-                        <div class="bg-white border border-neutral-200 p-4 text-xs font-light text-neutral-700 max-h-64 overflow-auto whitespace-pre-wrap font-mono leading-tight">
-                            ${node.content.prompt}
-                        </div>
-                    </div>` : ''}
-                    
-                    ${node.kind === 'llm' && node.content.response ? `
-                    <div class="mt-8">
-                        <div class="uppercase text-xs tracking-widest mb-3 font-medium">Response</div>
-                        <div class="bg-white border border-neutral-200 p-4 text-xs font-light text-neutral-700 max-h-64 overflow-auto whitespace-pre-wrap">
-                            ${node.content.response}
-                        </div>
-                    </div>` : ''}
-                    
-                    ${node.kind === 'tool' && node.content.output ? `
-                    <div class="mt-8">
-                        <div class="uppercase text-xs tracking-widest mb-3 font-medium">Tool Output</div>
-                        <div class="bg-white border border-neutral-200 p-4 text-xs font-light text-neutral-700 max-h-64 overflow-auto whitespace-pre-wrap font-mono">
-                            ${typeof node.content.output === 'object' ? JSON.stringify(node.content.output, null, 2) : node.content.output}
-                        </div>
-                    </div>` : ''}
                 </div>
-            `;
-        }
-        
-        async function loadTraces() {
-            try {
-                const res = await fetch('/api/traces?limit=12');
-                const traces = await res.json();
-                
-                const container = document.getElementById('trace-list');
-                container.innerHTML = '';
-                
-                if (traces.length === 0) {
-                    const empty = document.createElement('div');
-                    empty.className = "px-6 py-8 text-center text-neutral-300 text-xs";
-                    empty.textContent = '— no traces —';
-                    container.appendChild(empty);
-                    return;
-                }
-                
-                traces.forEach(trace => {
-                    const div = document.createElement('div');
-                    div.className = `trace-item px-5 py-4 border-l-2 cursor-pointer ${trace.id === currentTraceId ? 'trace-item-active' : 'border-transparent'}`;
-                    div.innerHTML = `
-                        <div class="flex justify-between items-baseline">
-                            <div class="font-medium text-sm">${trace.name}</div>
-                            <div class="text-xs font-mono text-neutral-400">${trace.duration_ms}ms</div>
-                        </div>
-                        <div class="flex justify-between items-center text-xs mt-2">
-                            <div class="font-mono text-neutral-400">${trace.id.substring(0, 8)}</div>
-                            <div class="${trace.success ? 'text-emerald-500' : 'text-red-500'}">
-                                ${trace.success ? '✔' : '✕'}
-                            </div>
-                        </div>
-                    `;
-                    div.onclick = () => loadTrace(trace.id);
-                    container.appendChild(div);
-                });
-            } catch (e) {
-                console.error(e);
-            }
-        }
-        
-        async function loadTrace(id) {
-            currentTraceId = id;
-            try {
-                const res = await fetch(`/api/traces/${id}/graph`);
-                const data = await res.json();
-                currentTraceData = data;
-                
-                // Update header
-                document.getElementById('active-trace-name').textContent = data.name || 'Workflow';
-                
-                const statusEl = document.getElementById('trace-status');
-                statusEl.className = `w-2 h-2 rounded-full ${data.success !== false ? 'bg-emerald-400' : 'bg-red-400'}`;
-                
-                // Render the graph
-                renderGraph(data);
-                
-                // Update stats
-                const totalTokens = calculateTotalTokens(data);
-                document.getElementById('stats').innerHTML = `
-                    <span class="inline-flex items-center gap-x-2">
-                        <span class="text-emerald-500">◉</span> 
-                        <span>${totalTokens} tokens</span>
-                    </span>
-                    <span>${countSteps(data)} steps</span>
-                `;
-                
-                // Reload list to highlight active
-                loadTraces();
-                
-                // Clear inspector
-                document.getElementById('inspector-placeholder').classList.remove('hidden');
-                document.getElementById('inspector-content').classList.add('hidden');
-            } catch (err) {
-                console.error("Failed to load trace", err);
-            }
-        }
-        
-        function calculateTotalTokens(root) {
-            let total = 0;
-            function visit(n) {
-                if (n.kind === 'llm' && n.content && n.content.tokens) {
-                    total += parseInt(n.content.tokens, 10) || 0;
-                }
-                (n.children || []).forEach(visit);
-            }
-            visit(root);
-            return total;
-        }
-        
-        function countSteps(root) {
-            let count = 0;
-            function visit(n) {
-                count++;
-                (n.children || []).forEach(visit);
-            }
-            visit(root);
-            return count;
-        }
-        
-        function loadDemoTrace() {
-            // Synthetic demo trace
-            const demoTrace = {
-                id: "demo-" + Date.now().toString(36),
-                name: "research-agent",
-                kind: "trace",
-                duration_ms: 1248,
-                children: [
-                    {
-                        id: "s1",
-                        name: "plan",
-                        kind: "step",
-                        duration_ms: 320,
-                        content: { status: "ok" },
-                        children: [
-                            {
-                                id: "s2",
-                                name: "LLM Call",
-                                kind: "llm",
-                                duration_ms: 890,
-                                content: {
-                                    prompt: "What are the latest developments in quantum error correction?",
-                                    response: "Recent papers focus on surface codes and logical qubit scaling...",
-                                    tokens: 342
-                                }
-                            },
-                            {
-                                id: "s3",
-                                name: "web_search",
-                                kind: "tool",
-                                duration_ms: 420,
-                                content: {
-                                    arguments: { query: "quantum error correction 2024" },
-                                    output: "Found 3 new papers on arxiv"
-                                }
-                            }
-                        ]
-                    },
-                    {
-                        id: "s4",
-                        name: "synthesize",
-                        kind: "step",
-                        duration_ms: 530,
-                        content: {},
-                        children: [
-                            {
-                                id: "s5",
-                                name: "LLM Call",
-                                kind: "llm",
-                                duration_ms: 670,
-                                content: {
-                                    prompt: "Summarize the search results into a concise report",
-                                    response: "Summary: Surface code fidelity improved by 40%...",
-                                    tokens: 671
-                                }
-                            }
-                        ]
-                    }
-                ]
-            };
-            
-            currentTraceData = demoTrace;
-            document.getElementById('active-trace-name').textContent = 'research-agent (demo)';
-            document.getElementById('trace-status').className = 'w-2 h-2 rounded-full bg-emerald-400';
-            renderGraph(demoTrace);
-            
-            const statsHTML = `
-                <span class="inline-flex items-center gap-x-2">
-                    <span class="text-emerald-500">◉</span> 
-                    <span>1013 tokens</span>
-                </span>
-                <span>5 steps</span>
-            `;
-            document.getElementById('stats').innerHTML = statsHTML;
-            
-            document.getElementById('empty-state').style.display = 'none';
-            loadTraces();
-        }
-        
-        function showNewTraceModal() {
-            const modal = document.getElementById('modal-backdrop');
-            modal.classList.remove('hidden');
-            modal.classList.add('flex');
-        }
-        
-        function hideModal() {
-            const modal = document.getElementById('modal-backdrop');
-            modal.classList.add('hidden');
-            modal.classList.remove('flex');
-        }
-        
-        async function clearDatabase() {
-            if (!confirm('Delete all traces from the database?')) return;
-            try {
-                await fetch('/api/traces', { method: 'DELETE' });
-                document.getElementById('trace-list').innerHTML = '';
-                document.getElementById('empty-state').style.display = 'flex';
-                currentTraceId = null;
-                currentTraceData = null;
-                loadTraces();
-            } catch (e) {
-                console.error(e);
-            }
-        }
-        
-        function exportTrace() {
-            if (!currentTraceData) {
-                alert("No trace loaded");
-                return;
-            }
-            const dataStr = JSON.stringify(currentTraceData, null, 2);
-            const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
-            const exportFileDefaultName = `trace-${currentTraceId || 'export'}.json`;
-            
-            const linkElement = document.createElement('a');
-            linkElement.setAttribute('href', dataUri);
-            linkElement.setAttribute('download', exportFileDefaultName);
-            linkElement.click();
-        }
-        
-        function replayTrace() {
-            if (!currentTraceData) {
-                alert("Load a trace first");
-                return;
-            }
-            alert("Replay functionality would re-run this trace with mocked LLM and tool responses.\n\n(This is a UI stub — full implementation lives in later modules.)");
-        }
-        
-        function copyNodeToClipboard() {
-            if (!selectedNodeId || !currentTraceData) return;
-            const node = findNodeById(currentTraceData, selectedNodeId);
-            if (!node) return;
-            navigator.clipboard.writeText(JSON.stringify(node, null, 2)).then(() => {
-                const orig = event.target.textContent;
-                event.target.textContent = 'COPIED ✓';
-                setTimeout(() => {
-                    event.target.textContent = orig;
-                }, 1400);
-            });
-        }
-        
-        // Keyboard shortcuts
-        function handleKeyboard(e) {
-            if (e.metaKey && e.key === "k") {
-                e.preventDefault();
-                loadTraces();
-            }
-        }
-        
-        // Initialize everything
-        function initialize() {
-            initializeTailwind();
-            
-            // Make SVG responsive
-            const svg = document.getElementById('graph-svg');
-            svg.setAttribute("viewBox", "0 0 820 520");
-            svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
-            
-            // Initial load
-            loadTraces();
-            
-            // Keyboard
-            document.addEventListener('keydown', handleKeyboard);
-            
-            // Demo on first load after 420ms
-            setTimeout(() => {
-                if (!currentTraceData) {
-                    // Do not auto-load demo so user sees empty state first
-                }
-            }, 420);
-            
-            console.log('%cFlowTrace initialized — Swiss minimal UI ready', 'font-family:monospace;color:#e30613;font-size:10px');
-        }
-        
-        window.onload = initialize;
-    </script>
+            </main>
+
+            <!-- Inspector -->
+            <aside class="inspector">
+                <div class="inspector-header">
+                    <h2>Inspector</h2>
+                    <div id="inspector-trace-id" class="trace-id-badge"></div>
+                </div>
+                <div id="inspector-content">
+                    <div class="empty-inspector">
+                        Click a node in the graph to inspect
+                    </div>
+                </div>
+            </aside>
+        </div>
+    </div>
 </body>
 </html>

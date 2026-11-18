@@ -8,7 +8,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
 from typing import Any, Dict, List, Union
 
-from .models import Trace, TraceSummary
+from .models import Trace, TraceSummary, TraceComparison
 from .storage import SQLiteStore
 
 
@@ -54,6 +54,16 @@ def get_store() -> SQLiteStore:
     if _store is None:
         _store = SQLiteStore()
     return _store
+
+
+def _count_steps(step: Any) -> int:
+    """Recursively count steps (including the current one)."""
+    if step is None:
+        return 0
+    count = 1
+    for child in getattr(step, "children", []):
+        count += _count_steps(child)
+    return count
 
 
 @router.get("/traces", response_model=List[TraceSummary])
@@ -118,6 +128,39 @@ def get_trace_graph(
             detail=f"Trace with id '{trace_id}' not found",
         )
     return trace.root_step
+
+
+@router.get("/compare/{trace_id1}/{trace_id2}", response_model=TraceComparison)
+def compare_traces(
+    trace_id1: str,
+    trace_id2: str,
+    store: SQLiteStore = Depends(get_store),
+) -> TraceComparison:
+    """Return two complete traces with computed differences for the
+    side-by-side comparison view.
+    """
+    trace1 = store.get_trace(trace_id1)
+    trace2 = store.get_trace(trace_id2)
+    if trace1 is None or trace2 is None:
+        raise HTTPException(
+            status_code=404,
+            detail="One or both traces not found",
+        )
+
+    diff = {
+        "duration_diff": round(abs(trace1.duration - trace2.duration), 3),
+        "token_diff": abs(trace1.total_tokens - trace2.total_tokens),
+        "step_count_diff": abs(
+            _count_steps(trace1.root_step) - _count_steps(trace2.root_step)
+        ),
+        "success_match": trace1.success == trace2.success,
+    }
+
+    return TraceComparison(
+        trace1=trace1,
+        trace2=trace2,
+        differences=diff,
+    )
 
 
 @router.websocket("/ws/traces/{trace_id}")

@@ -57,7 +57,7 @@ Every invocation with arguments, output and caller location
 </td>
 <td align="center" valign="top">
 💾 <b>Local persistence</b><br>
-SQLite store with history, filtering and comparison
+SQLite store with history, filtering, side-by-side comparison
 </td>
 <td align="center" valign="top">
 ▶️ <b>Trace replay</b><br>
@@ -76,6 +76,12 @@ WebSocket endpoint — traces appear live as they run
 <td align="center" valign="top">
 📊 <b>Summary statistics</b><br>
 Token usage, success rate, slowest steps and failure patterns
+</td>
+</tr>
+<tr>
+<td align="center" valign="top" colspan="3">
+🔄 <b>Side-by-side comparison</b><br>
+Select any two traces to view aligned SVG graphs, stats, and computed differences
 </td>
 </tr>
 </table>
@@ -203,6 +209,17 @@ The handler automatically:
 - Records LLM prompts/responses/tokens, tool inputs/outputs, chain steps
 - Finalizes timing and persists the trace to SQLite when the root run completes
 
+### Side-by-side trace comparison
+
+In the dashboard, use the checkboxes next to traces in the history list to select exactly two traces, then click **Compare** in the header. The main view switches to a split layout with:
+
+- Two interactive SVG graphs placed side-by-side (strict hierarchical grid layout preserved for each trace)
+- Summary statistics for both traces
+- A differences panel showing duration delta, token usage delta, and step count delta
+- A shared inspector: click any node in either graph to see its prompt/response/tool data, with visual indication of which trace it belongs to
+
+Exit comparison mode with the **Single View** button to return to the standard inspector+graph layout. This makes it trivial to spot regressions, performance changes, or differences in agent behaviour across runs.
+
 ### CLI inspection
 
 ```bash
@@ -286,9 +303,9 @@ flowchart TD
     Tracer --> Models["models.py<br/>Pydantic Trace + Step (with .from_tracer_context)"]
     Models --> Storage["storage.py<br/>SQLiteStore (save_trace, get_trace, list_traces)"]
     Storage <--> DB["flowtrace.db"]
-    Storage --> API["api.py<br/>FastAPI router (/api/traces, /graph, POST ingest, POST /live, WS /ws/traces/{id})"]
+    Storage --> API["api.py<br/>FastAPI router (/api/traces, /graph, POST ingest, POST /live, WS /ws/traces/{id}, GET /compare/{id1}/{id2})"]
     API --> Server["server.py<br/>create_app() + Jinja templates + static mount"]
-    Server --> UI["templates/index.html + static/script.js<br/>SVG renderer + inspector + live WS client"]
+    Server --> UI["templates/index.html + static/script.js<br/>SVG renderer + inspector + live WS client + side-by-side compare"]
     CLI["cli.py<br/>serve, list, view, clear"] --> Server
     External["Non-Python agents"] --> API
     current_trace["current_trace() ContextVar"] -.-> Tracer
@@ -334,7 +351,7 @@ The test suite (`tests/test_tracer.py`) covers `TraceContext` nested step constr
 - [x] **v0.1.0** — first release: Zero-config tracing, Interactive graphs, Prompt inspector, Tool call browser
 - [x] Add official LangChain callback handler for zero-code instrumentation
 - [x] Implement WebSocket endpoint for live trace streaming during runs
-- [ ] Build side-by-side trace comparison view
+- [x] Build side-by-side trace comparison view
 - [ ] Add search across prompts and tool outputs in trace history
 - [ ] Create first-party LlamaIndex integration adapter
 - [ ] Export traces to OpenTelemetry / LangSmith compatible format

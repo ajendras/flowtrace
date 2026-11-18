@@ -112,3 +112,13 @@ class TraceSummary(BaseModel):
     total_tokens: int = 0
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class TraceComparison(BaseModel):
+    """Model returned by the side-by-side comparison endpoint."""
+
+    trace1: Trace
+    trace2: Trace
+    differences: Dict[str, Any] = Field(default_factory=dict)
+
+    model_config = ConfigDict(from_attributes=True)
