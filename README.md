@@ -57,7 +57,7 @@ Every invocation with arguments, output and caller location
 </td>
 <td align="center" valign="top">
 💾 <b>Local persistence</b><br>
-SQLite store with history, filtering, side-by-side comparison
+SQLite store with history, content search across prompts &amp; tool outputs, filtering, side-by-side comparison
 </td>
 <td align="center" valign="top">
 ▶️ <b>Trace replay</b><br>
@@ -352,7 +352,7 @@ The test suite (`tests/test_tracer.py`) covers `TraceContext` nested step constr
 - [x] Add official LangChain callback handler for zero-code instrumentation
 - [x] Implement WebSocket endpoint for live trace streaming during runs
 - [x] Build side-by-side trace comparison view
-- [ ] Add search across prompts and tool outputs in trace history
+- [x] Add search across prompts and tool outputs in trace history
 - [ ] Create first-party LlamaIndex integration adapter
 - [ ] Export traces to OpenTelemetry / LangSmith compatible format
 - [ ] Add latency flamegraph and per-step token analytics dashboard

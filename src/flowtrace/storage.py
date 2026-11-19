@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from sqlalchemy import (
     Boolean,
@@ -115,27 +115,79 @@ class SQLiteStore:
             data = json.loads(record.trace_json)
             return Trace.model_validate(data)
 
-    def list_traces(self, limit: int = 50) -> List[TraceSummary]:
-        """Return the most recent traces as lightweight summaries."""
+    def list_traces(self, limit: int = 50, search: Optional[str] = None) -> List[TraceSummary]:
+        """Return the most recent traces as lightweight summaries.
+
+        If ``search`` is supplied it filters to traces whose name or any
+        step content (prompts, responses, tool inputs/outputs/arguments,
+        errors, etc.) contains the term. The search is case-insensitive.
+        """
         with self.SessionLocal() as session:
-            stmt = (
-                select(TraceRecord)
-                .order_by(TraceRecord.start.desc())
-                .limit(limit)
-            )
+            stmt = select(TraceRecord).order_by(TraceRecord.start.desc())
+            if not search or not search.strip():
+                stmt = stmt.limit(limit)
+            else:
+                stmt = stmt.limit(200)
             records = session.execute(stmt).scalars().all()
 
-            return [
-                TraceSummary(
-                    id=r.id,
-                    name=r.name,
-                    start=r.start,
-                    duration_ms=round(r.duration * 1000, 2),
-                    success=bool(r.success),
-                    total_tokens=int(r.total_tokens or 0),
+            result: List[TraceSummary] = []
+            term = (search or "").lower().strip()
+            for r in records:
+                if term:
+                    try:
+                        data = json.loads(r.trace_json)
+                        if not self._trace_matches_search(data, term):
+                            continue
+                    except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
+                        continue
+                result.append(
+                    TraceSummary(
+                        id=r.id,
+                        name=r.name,
+                        start=r.start,
+                        duration_ms=round(r.duration * 1000, 2),
+                        success=bool(r.success),
+                        total_tokens=int(r.total_tokens or 0),
+                    )
                 )
-                for r in records
-            ]
+                if len(result) >= limit:
+                    break
+            return result
+
+    def _trace_matches_search(self, trace_dict: Dict[str, Any], term: str) -> bool:
+        """Return True if term appears in name or any step content."""
+        if term in trace_dict.get("name", "").lower():
+            return True
+        root_step = trace_dict.get("root_step")
+        if isinstance(root_step, dict):
+            return self._step_contains_term(root_step, term)
+        return False
+
+    def _step_contains_term(self, step: Dict[str, Any], term: str) -> bool:
+        if term in step.get("name", "").lower():
+            return True
+        content = step.get("content")
+        if isinstance(content, dict):
+            for v in content.values():
+                if self._value_contains_term(v, term):
+                    return True
+        for child in step.get("children", []):
+            if isinstance(child, dict) and self._step_contains_term(child, term):
+                return True
+        return False
+
+    def _value_contains_term(self, value: Any, term: str) -> bool:
+        if isinstance(value, str):
+            return term in value.lower()
+        if isinstance(value, dict):
+            for v in value.values():
+                if self._value_contains_term(v, term):
+                    return True
+        if isinstance(value, list):
+            for item in value:
+                if self._value_contains_term(item, term):
+                    return True
+        return False
 
     def clear_all(self) -> int:
         """Delete every stored trace. Returns number of deleted rows.

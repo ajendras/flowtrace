@@ -6,7 +6,7 @@ dashboard and the HTTP ingestion path for non-Python agents.
 
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 
 from .models import Trace, TraceSummary, TraceComparison
 from .storage import SQLiteStore
@@ -68,12 +68,18 @@ def _count_steps(step: Any) -> int:
 
 @router.get("/traces", response_model=List[TraceSummary])
 def list_traces(
-    limit: int = 50, store: SQLiteStore = Depends(get_store)
+    limit: int = 50,
+    q: Optional[str] = None,
+    store: SQLiteStore = Depends(get_store)
 ) -> List[TraceSummary]:
-    """Return recent trace summaries (newest first)."""
+    """Return recent trace summaries (newest first).
+
+    The optional ``q`` parameter performs a full-text search over trace names,
+    prompt texts, LLM responses, tool call arguments/outputs and other content.
+    """
     if limit < 1 or limit > 200:
         limit = 50
-    return store.list_traces(limit=limit)
+    return store.list_traces(limit=limit, search=q)
 
 
 @router.post("/traces", status_code=status.HTTP_201_CREATED)
