@@ -12,7 +12,7 @@ from typing import Any, Callable, Optional, Union
 from .tracer import TraceContext, current_trace, trace
 
 __version__ = "0.1.0"
-__all__ = ["trace", "TraceContext", "current_trace", "run_server", "FlowTraceHandler"]
+__all__ = ["trace", "TraceContext", "current_trace", "run_server", "FlowTraceHandler", "LlamaIndexHandler"]
 
 
 def run_server(port: int = 8080, host: str = "127.0.0.1") -> None:
@@ -41,20 +41,29 @@ def run_server(port: int = 8080, host: str = "127.0.0.1") -> None:
 
 
 def __getattr__(name: str) -> Any:
-    """Lazy-load FlowTraceHandler and the langchain submodule.
+    """Lazy-load FlowTraceHandler, LlamaIndexHandler and the integration submodules.
 
-    This ensures langchain-core is not imported unless the handler
-    or langchain integration is explicitly used. Also supports test
-    patching of flowtrace.langchain.
+    This ensures langchain-core or llama-index-core is not imported unless the
+    handler or integration is explicitly used. Also supports test patching.
     """
     if name == "FlowTraceHandler":
         from .langchain import FlowTraceHandler as _Handler
 
         globals()["FlowTraceHandler"] = _Handler
         return _Handler
+    if name == "LlamaIndexHandler":
+        from .llamaindex import LlamaIndexHandler as _Handler
+
+        globals()["LlamaIndexHandler"] = _Handler
+        return _Handler
     if name == "langchain":
         from . import langchain as _langchain
 
         globals()["langchain"] = _langchain
         return _langchain
+    if name == "llamaindex":
+        from . import llamaindex as _llamaindex
+
+        globals()["llamaindex"] = _llamaindex
+        return _llamaindex
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

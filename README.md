@@ -24,7 +24,7 @@
 AI agents chain dozens of LLM calls, tool invocations, memory reads, and nested logic, yet failures remain opaque black boxes. Cloud observability platforms are expensive and framework-specific, while log-based tools drown you in noise. FlowTrace is a lightweight, local-first dashboard that auto-instruments *any* Python agent code and renders clean interactive SVG graphs—so you can instantly see what happened, why it failed, and how to fix it.
 
 - Zero-config tracing with a single `@trace` decorator or context manager—no framework lock-in
-- Official LangChain callback handler for zero-code instrumentation of any chain, agent, LLM or tool
+- Official LangChain and LlamaIndex handlers for zero-code instrumentation of any chain, agent, LLM, query engine or tool
 - Interactive SVG node-link diagrams that visualise nesting, timing, step kinds, and data flow on a strict grid
 - Clickable inspector panels showing raw prompts, responses, token counts, tool arguments, latency, and errors
 - Local SQLite persistence with history browsing, trace replay (mocked tools), HTTP ingestion for non-Python agents, and summary statistics
@@ -39,7 +39,7 @@ AI agents chain dozens of LLM calls, tool invocations, memory reads, and nested 
 <tr>
 <td align="center" valign="top" width="33%">
 🔌 <b>Zero-config tracing</b><br>
-Decorator, context manager, and official LangChain callback handler
+Decorator, context manager, and official LangChain + LlamaIndex handlers
 </td>
 <td align="center" valign="top" width="33%">
 📈 <b>Interactive SVG graphs</b><br>
@@ -100,6 +100,12 @@ For LangChain support:
 pip install "flowtrace[langchain]"
 ```
 
+For LlamaIndex support:
+
+```bash
+pip install "flowtrace[llamaindex]"
+```
+
 Start the Swiss-minimal dashboard:
 
 ```bash
@@ -158,6 +164,24 @@ def wikipedia(query: str):
 # agent.invoke(...)  # trace saved automatically
 ```
 
+**With LlamaIndex (zero-code):**
+
+```python
+# pip install "flowtrace[llamaindex]" llama-index-core llama-index
+from llama_index.core import VectorStoreIndex, SimpleDirectoryReader, Settings
+from llama_index.core.callbacks import CallbackManager
+from flowtrace import LlamaIndexHandler
+
+handler = LlamaIndexHandler(name="QueryEngine", live=True)
+Settings.callback_manager = CallbackManager([handler])
+
+documents = SimpleDirectoryReader("data").load_data()
+index = VectorStoreIndex.from_documents(documents)
+query_engine = index.as_query_engine()
+response = query_engine.query("Explain FlowTrace observability")
+print(response)
+```
+
 ## 🧰 Usage
 
 ### Manual context with steps
@@ -176,7 +200,7 @@ with TraceContext(name="CustomerSupportAgent") as tc:
 
 ### Live streaming
 
-Enable real-time WebSocket updates so the dashboard graph builds node-by-node while your agent runs (works with both manual `TraceContext` and the LangChain handler):
+Enable real-time WebSocket updates so the dashboard graph builds node-by-node while your agent runs (works with both manual `TraceContext` and the LangChain/LlamaIndex handlers):
 
 ```python
 from flowtrace import TraceContext, current_trace
@@ -208,6 +232,27 @@ The handler automatically:
 - Builds a nested step tree using LangChain's `run_id`/`parent_run_id`
 - Records LLM prompts/responses/tokens, tool inputs/outputs, chain steps
 - Finalizes timing and persists the trace to SQLite when the root run completes
+
+### LlamaIndex zero-code instrumentation
+
+```python
+from flowtrace import LlamaIndexHandler
+from llama_index.core.callbacks import CallbackManager
+from llama_index.core import Settings
+
+handler = LlamaIndexHandler(name="MyIndexWorkflow", live=True)
+Settings.callback_manager = CallbackManager([handler])
+
+# Any LlamaIndex query, chat, agent, embedding or retrieval now emits traces
+# index.as_query_engine().query(...)
+# agent.chat(...)
+```
+
+The handler automatically:
+- Creates a `TraceContext` on the first event
+- Maps LlamaIndex `CBEventType` (LLM, QUERY, RETRIEVE, EMBEDDING, TOOL, AGENT, ...) into steps
+- Parses payload for prompts, responses, tokens, queries and errors
+- Builds a nested tree using event IDs and persists on root completion
 
 ### Side-by-side trace comparison
 
@@ -288,7 +333,7 @@ Load a trace via the UI or `flowtrace view`, then replay it while overriding too
 <tr>
 <td><code>live</code></td>
 <td><code>false</code></td>
-<td>Enable real-time WebSocket streaming (<code>TraceContext(..., live=True)</code> or <code>FlowTraceHandler(..., live=True)</code>; respects <code>FLOWTRACE_SERVER_URL</code> env var)</td>
+<td>Enable real-time WebSocket streaming (<code>TraceContext(..., live=True)</code> or <code>FlowTraceHandler(..., live=True)</code> or <code>LlamaIndexHandler(..., live=True)</code>; respects <code>FLOWTRACE_SERVER_URL</code> env var)</td>
 </tr>
 </tbody>
 </table>
@@ -299,7 +344,9 @@ Load a trace via the UI or `flowtrace view`, then replay it while overriding too
 flowchart TD
     AgentCode["Agent / examples/agent_example.py"] --> Tracer["tracer.py<br/>TraceContext + @trace + Step tree<br/>(live=True streams via HTTP)"]
     LangChain["LangChain (LLM/Agent/Chain)"] --> Handler["langchain.py<br/>FlowTraceHandler (official callback)"]
+    LlamaIndex["LlamaIndex (QueryEngine/Agent/LLM)"] --> Handler2["llamaindex.py<br/>LlamaIndexHandler (official callback)"]
     Handler --> Tracer
+    Handler2 --> Tracer
     Tracer --> Models["models.py<br/>Pydantic Trace + Step (with .from_tracer_context)"]
     Models --> Storage["storage.py<br/>SQLiteStore (save_trace, get_trace, list_traces)"]
     Storage <--> DB["flowtrace.db"]
@@ -311,7 +358,7 @@ flowchart TD
     current_trace["current_trace() ContextVar"] -.-> Tracer
 ```
 
-`TraceContext` builds a nested `Step` tree using `perf_counter` timing and `contextvars` for async/thread safety. The tree is converted to Pydantic models, persisted as JSON in SQLite (with denormalised summary fields), and served to a single-page Swiss-minimal frontend that renders an interactive SVG graph on a strict hierarchical grid. All public APIs (`trace`, `TraceContext`, `run_server`, `FlowTraceHandler`, CLI commands) are defined in the shown source files.
+`TraceContext` builds a nested `Step` tree using `perf_counter` timing and `contextvars` for async/thread safety. The tree is converted to Pydantic models, persisted as JSON in SQLite (with denormalised summary fields), and served to a single-page Swiss-minimal frontend that renders an interactive SVG graph on a strict hierarchical grid. All public APIs (`trace`, `TraceContext`, `run_server`, `FlowTraceHandler`, `LlamaIndexHandler`, CLI commands) are defined in the shown source files.
 
 ## 📁 Project structure
 
@@ -319,8 +366,9 @@ flowchart TD
 .
 ├── pyproject.toml                 # Metadata, dependencies, console script entrypoint
 ├── src/flowtrace/
-│   ├── __init__.py                # Public API: trace(), TraceContext, current_trace(), run_server(), FlowTraceHandler
+│   ├── __init__.py                # Public API: trace(), TraceContext, current_trace(), run_server(), FlowTraceHandler, LlamaIndexHandler
 │   ├── langchain.py               # Official LangChain BaseCallbackHandler (zero-code)
+│   ├── llamaindex.py              # Official LlamaIndex BaseCallbackHandler (zero-code)
 │   ├── tracer.py                  # Core TraceContext, Step dataclass, @trace decorator, record_llm_call/record_tool_call
 │   ├── models.py                  # Pydantic Trace, Step (with from_tracer_context), TraceSummary
 │   ├── storage.py                 # SQLiteStore with create_tables, save_trace, get_trace, list_traces, clear_all
@@ -332,18 +380,18 @@ flowchart TD
 ├── static/
 │   ├── script.js                  # Vanilla JS: loadTraces(), renderGraph() (strict grid SVG), onNodeClick(), inspector
 │   └── styles.css                 # Strict Swiss design: #e30613 accent, hairline rules, system-ui, no shadows
-├── tests/test_tracer.py           # pytest suite for context, decorator, nesting, timing, errors, uniqueness, LangChain handler
+├── tests/test_tracer.py           # pytest suite for context, decorator, nesting, timing, errors, uniqueness, LangChain + LlamaIndex handlers
 └── examples/agent_example.py      # Runnable mock research agent demonstrating realistic usage + LangChain handler
 ```
 
 ## 🧪 Testing
 
 ```bash
-pip install -e ".[test,langchain]"
+pip install -e ".[test,langchain,llamaindex]"
 pytest
 ```
 
-The test suite (`tests/test_tracer.py`) covers `TraceContext` nested step construction, `@trace` decorator behaviour (both top-level and nested), LLM/tool recording, timing accuracy, error capture, `current_trace()` contextvar semantics, UUID uniqueness, and the LangChain `FlowTraceHandler` (with mocked callbacks and store).
+The test suite (`tests/test_tracer.py`) covers `TraceContext` nested step construction, `@trace` decorator behaviour (both top-level and nested), LLM/tool recording, timing accuracy, error capture, `current_trace()` contextvar semantics, UUID uniqueness, and both official handlers (`FlowTraceHandler` and `LlamaIndexHandler` with mocked callbacks and store).
 
 ## 📍 Roadmap
 
@@ -353,7 +401,7 @@ The test suite (`tests/test_tracer.py`) covers `TraceContext` nested step constr
 - [x] Implement WebSocket endpoint for live trace streaming during runs
 - [x] Build side-by-side trace comparison view
 - [x] Add search across prompts and tool outputs in trace history
-- [ ] Create first-party LlamaIndex integration adapter
+- [x] Create first-party LlamaIndex integration adapter
 - [ ] Export traces to OpenTelemetry / LangSmith compatible format
 - [ ] Add latency flamegraph and per-step token analytics dashboard
 - [ ] Support manual annotations and comments on any step
