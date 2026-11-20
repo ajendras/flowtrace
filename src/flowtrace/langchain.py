@@ -48,7 +48,8 @@ class FlowTraceHandler(BaseCallbackHandler):  # type: ignore[valid-type]
         if self.trace is None:
             self.trace = TraceContext(name=self.name, live=self.live)
             self.trace.__enter__()
-            self.store = SQLiteStore()
+            if self.store is None:
+                self.store = SQLiteStore()
         return self.trace
 
     def _get_parent_step(self, parent_run_id: Optional[str]) -> Step:

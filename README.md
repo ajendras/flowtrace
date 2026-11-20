@@ -193,7 +193,7 @@ with TraceContext(name="CustomerSupportAgent") as tc:
     tc.record_step("Load user profile", "setup")
     tc.record_step("Log event")  # kind defaults to "step"
     
-    with tc.step("Generate response", "phase"):
+    with tc.step("Generate response", kind="phase", metadata={"model": "gpt-4"}):
         tc.record_llm_call("You are a helpful agent...", "Here is your refund link", 87)
         tc.record_tool_call("get_order", {"order_id": 42}, {"status": "shipped"})
 ```

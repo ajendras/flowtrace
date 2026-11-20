@@ -11,13 +11,13 @@ import httpx
 import os
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import wraps
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
@@ -37,316 +37,198 @@ class Step:
     duration: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert step (and children) to JSON-serializable dict.
-
-        Used by the API layer and frontend SVG renderer.
-        Durations are reported in milliseconds.
-        """
+        """Convert step (and children) to JSON-serializable dict."""
         return {
             "id": self.id,
             "name": self.name,
             "kind": self.kind,
-            "content": self.content,
-            "children": [child.to_dict() for child in self.children],
+            "content": dict(self.content),
+            "children": [c.to_dict() for c in self.children],
             "duration_ms": round(self.duration * 1000, 2),
         }
 
 
-# Thread-safe and async-safe current trace using contextvars.
-_current_trace_var: ContextVar[Optional[TraceContext]] = ContextVar(
-    "flowtrace_current", default=None
+_trace_context: ContextVar[Optional[TraceContext]] = ContextVar(
+    "trace_context", default=None
 )
 
 
 def current_trace() -> Optional[TraceContext]:
-    """Return the active TraceContext for the current execution context.
+    """Return the active TraceContext for the current execution context."""
+    return _trace_context.get()
 
-    Returns None if no trace is active. Used by decorators, manual
-    instrumentation, and library code.
-    """
-    return _current_trace_var.get()
+
+def trace(
+    name: str = "workflow", live: bool = False
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Decorator to trace a function with a TraceContext."""
+
+    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+        @wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            with TraceContext(name=name, live=live):
+                return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
 
 
 class TraceContext:
-    """Main tracing context and step recorder.
+    """Main context manager for building nested trace trees.
 
-    Used as a context manager to start a trace and automatically
-    finalise timing on exit. Maintains a stack for nested steps.
-    All public recording methods are thread-safe within the same
-    contextvar scope.
+    Can be used directly, with the @trace decorator, or by the framework
+    handlers. Supports live streaming to the dashboard via HTTP POSTs.
     """
 
     def __init__(self, name: str = "workflow", live: bool = False) -> None:
-        """Create a new trace with a root step.
-
-        Args:
-            name: Human-readable name for the root trace step.
-            live: When True, each step completion posts the current tree
-                  to the dashboard so the UI can update the graph in
-                  real time via WebSocket (default: False).
-        """
-        self.trace_id: str = str(uuid.uuid4())
-        self.name: str = name
-        self.live: bool = live
-        self.server_url: str = os.getenv(
-            "FLOWTRACE_SERVER_URL", "http://127.0.0.1:8080"
-        )
-        self.start: datetime = datetime.now()
-        self.start_time: float = time.perf_counter()
-        self.success: bool = True
-
+        self.name = name
+        self.live = live
+        self.trace_id = str(uuid.uuid4())
         self.root_step = Step(
             id=self.trace_id,
             name=name,
             kind="trace",
-            start=self.start_time,
+            start=time.perf_counter(),
         )
-
-        self.step_stack: List[Step] = [self.root_step]
-        self.token: Optional[object] = None
+        self.current_step: List[Step] = [self.root_step]
+        self.start = datetime.now()
+        self.success = True
+        self.total_tokens = 0
+        self._token: Optional[object] = None
 
     def __enter__(self) -> TraceContext:
-        """Enter the context, register as current trace."""
-        self.token = _current_trace_var.set(self)
+        self._token = _trace_context.set(self)
+        if self.live:
+            self._send_live_update()
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        """Exit the context, finalise root duration and error state."""
-        end_time = time.perf_counter()
-        self.root_step.duration = end_time - self.start_time
-
+        self.root_step.duration = time.perf_counter() - self.root_step.start
         if exc_type is not None:
             self.success = False
-            error_data: Dict[str, Any] = {
-                "error": str(exc_val) if exc_val is not None else "unknown",
-                "error_type": exc_type.__name__,
-                "error_message": str(exc_val) if exc_val is not None else "unknown",
-                "status": "failed",
-            }
-            if (
-                not self.root_step.children
-                or self.root_step.children[-1].content.get("status") != "failed"
-            ):
-                self.record_step("Execution Error", "error", error_data)
-            else:
-                self.root_step.content.update(error_data)
-
+            if self.current_step:
+                current = self.current_step[-1]
+                current.content["status"] = "failed"
+                current.content["error"] = str(exc_val)
         if self.live:
-            self._stream_update()
+            self._send_live_update()
+        if self._token is not None:
+            _trace_context.reset(self._token)
+        self._token = None
 
-        if self.token is not None:
-            _current_trace_var.reset(self.token)
+    def get_root_step(self) -> Step:
+        """Return the root step for model conversion."""
+        return self.root_step
+
+    def record_llm_call(
+        self,
+        prompt: str,
+        response: str,
+        tokens: int = 0,
+        latency: Optional[float] = None,
+    ) -> None:
+        """Record an LLM call as a step in the trace."""
+        content: Dict[str, Any] = {
+            "prompt": prompt,
+            "response": response,
+            "tokens": tokens,
+            "status": "completed",
+        }
+        if latency is not None:
+            content["latency"] = latency
+        self.record_step("LLM Call", kind="llm", content=content)
+        self.total_tokens += tokens
+
+    def record_tool_call(
+        self,
+        name: str,
+        args: Dict[str, Any],
+        result: Any,
+        latency: Optional[float] = None,
+    ) -> None:
+        """Record a tool invocation as a step in the trace."""
+        content: Dict[str, Any] = {
+            "args": args,
+            "result": result,
+            "status": "completed",
+        }
+        if latency is not None:
+            content["latency"] = latency
+        self.record_step(name, kind="tool", content=content)
+
+    def record_step(
+        self,
+        name: str,
+        kind: str = "step",
+        content: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Record a generic step (leaf node)."""
+        content = content or {}
+        step = Step(
+            id=str(uuid.uuid4()),
+            name=name,
+            kind=kind,
+            content=dict(content),
+            start=time.perf_counter(),
+            duration=0.0,
+        )
+        self.current_step[-1].children.append(step)
+        if self.live:
+            self._send_live_update()
 
     @contextmanager
     def step(
         self,
         name: str,
         kind: str = "step",
-        data: Optional[Dict[str, Any]] = None,
-    ):
-        """Context manager for a nested timed step.
-
-        Automatically records start time on entry and duration on exit.
-        Supports arbitrary metadata via the data dict. Used internally
-        by the decorator and record_* methods.
-        """
-        if data is None:
-            data = {}
-
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Iterator[Step]:
+        """Context manager for a nested step. Supports metadata passed into content."""
+        content: Dict[str, Any] = dict(metadata) if metadata else {}
         step = Step(
             id=str(uuid.uuid4()),
             name=name,
             kind=kind,
-            content=data.copy(),  # defensive copy
+            content=content,
             start=time.perf_counter(),
         )
-
-        parent = self.step_stack[-1]
+        parent = self.current_step[-1]
         parent.children.append(step)
-        self.step_stack.append(step)
-
+        self.current_step.append(step)
+        if self.live:
+            self._send_live_update()
         try:
             yield step
-        except Exception as exc:  # pylint: disable=broad-except
-            step.content.setdefault("error", str(exc))
-            step.content.setdefault("status", "failed")
+        except Exception as exc:
+            step.content["status"] = "failed"
+            step.content["error"] = str(exc)
+            self.success = False
             raise
         finally:
-            end = time.perf_counter()
-            step.duration = end - step.start
-            self.step_stack.pop()
+            step.duration = time.perf_counter() - step.start
+            self.current_step.pop()
             if self.live:
-                self._stream_update()
+                self._send_live_update()
 
-    def record_step(
-        self,
-        name: str,
-        kind: str = "step",
-        data: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        """Record an instantaneous completed step.
-
-        Useful for events that do not need their own nested children.
-        The step is added to the current parent in the trace tree.
-
-        Args:
-            name: The name of the step/event.
-            kind: The category of step (default: "step"). Common values:
-                "llm", "tool", "error", "setup", "phase".
-            data: Optional dict of metadata to attach.
-        """
-        if data is None:
-            data = {}
-        # Use the context manager with an empty body for consistent timing logic.
-        with self.step(name, kind, data):
-            pass
-
-    def record_llm_call(
-        self,
-        prompt: str,
-        response: str,
-        tokens: int,
-        latency: Optional[float] = None,
-    ) -> None:
-        """Record an LLM invocation with prompt, completion and usage stats.
-
-        Args:
-            prompt: The raw prompt sent to the model.
-            response: The model output.
-            tokens: Total tokens used (input+output).
-            latency: Optional wall-clock latency in seconds.
-        """
-        if latency is None:
-            latency = 0.0
-
-        data: Dict[str, Any] = {
-            "prompt": prompt,
-            "response": response,
-            "tokens": tokens,
-            "latency_ms": round(latency * 1000, 2),
+    def _send_live_update(self) -> None:
+        """Send current trace state to the live update endpoint."""
+        payload = {
+            "name": self.name,
+            "root_step": self.root_step.to_dict(),
+            "start": self.start.isoformat(),
+            "duration": self.root_step.duration,
+            "success": self.success,
+            "total_tokens": self.total_tokens,
         }
-        self.record_step("LLM Call", "llm", data)
+        self._live_post(payload)
 
-    def record_tool_call(
-        self, name: str, args: Dict[str, Any], result: Any
-    ) -> None:
-        """Record a tool invocation with arguments and return value.
-
-        Args:
-            name: Tool name (e.g. 'search', 'calculator').
-            args: Dictionary of arguments passed to the tool.
-            result: Tool output (will be stringified if complex).
-        """
-        output = (
-            result
-            if isinstance(result, (str, int, float, bool, dict, list))
-            else str(result)
-        )
-        data: Dict[str, Any] = {
-            "name": name,
-            "arguments": args,
-            "output": output,
-        }
-        self.record_step(name, "tool", data)
-
-    def _count_tokens(self, step: Optional[Step] = None) -> int:
-        """Recursively count tokens from all LLM steps."""
-        if step is None:
-            step = self.root_step
-        total = 0
-        if step.kind == "llm" and isinstance(step.content, dict):
-            total += int(step.content.get("tokens", 0))
-        for child in step.children:
-            total += self._count_tokens(child)
-        return total
-
-    def _stream_update(self) -> None:
-        """Stream current trace state to the dashboard (when live=True).
-
-        Posts to the /live endpoint which persists a snapshot and
-        broadcasts via WebSocket to any connected UI clients.
-        Failures are silently ignored so user code is never broken.
-        """
-        if not self.live:
-            return
+    def _live_post(self, payload: Dict[str, Any]) -> None:
+        """Best-effort HTTP POST to the live endpoint."""
+        base_url = os.getenv("FLOWTRACE_SERVER_URL", "http://127.0.0.1:8080")
+        url = f"{base_url}/api/traces/{self.trace_id}/live"
         try:
-            root_dict = self.root_step.to_dict()
-            payload = {
-                "name": self.name,
-                "root_step": root_dict,
-                "start": self.start.isoformat(),
-                "duration": round(time.perf_counter() - self.start_time, 3),
-                "success": self.success,
-                "total_tokens": self._count_tokens(),
-            }
-            url = f"{self.server_url}/api/traces/{self.trace_id}/live"
-            with httpx.Client(timeout=1.5) as client:
-                client.post(url, json=payload, headers={"User-Agent": "FlowTrace-Live"})
+            httpx.post(url, json=payload, timeout=0.5)
         except Exception:
-            # Never break user code if the dashboard is unreachable.
+            # Live streaming is best effort; do not fail the trace on network issues.
             pass
-
-    def get_root_step(self) -> Step:
-        """Return the root step of the trace tree.
-
-        Used by storage, API, and graph rendering layers.
-        """
-        return self.root_step
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convenience method to export the entire trace as a dict.
-
-        Includes trace metadata and the full nested step tree.
-        """
-        root = self.root_step.to_dict()
-        root["trace_id"] = self.trace_id
-        root["total_duration_ms"] = round(
-            (time.perf_counter() - self.start_time) * 1000, 2
-        )
-        return root
-
-
-def trace(
-    name: Optional[Union[str, Callable[..., Any]]] = None, kind: str = "step"
-) -> Callable[..., Any]:
-    """Decorator to automatically trace a function as a named step.
-
-    Supports two usage patterns:
-        @trace
-        def my_agent(...):
-            ...
-
-        @trace("Research Phase")
-        def research(...):
-            ...
-
-    If no active TraceContext exists, a new top-level trace is created.
-    Otherwise the function becomes a nested step. LLM and tool calls
-    made inside the function will be captured if they use current_trace().
-    """
-
-    def _decorate(func: Callable[..., Any]) -> Callable[..., Any]:
-        step_name = name if isinstance(name, str) else func.__name__
-        step_kind = kind
-
-        @wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
-            tc = current_trace()
-
-            if tc is None:
-                # Top-level trace
-                with TraceContext(name=step_name) as tc:
-                    with tc.step(step_name, step_kind):
-                        return func(*args, **kwargs)
-            else:
-                # Nested step inside existing trace
-                with tc.step(step_name, step_kind):
-                    return func(*args, **kwargs)
-
-        return wrapper
-
-    # Support bare @trace (name is the function) and @trace("name")
-    if callable(name):
-        return _decorate(name)
-
-    return _decorate
