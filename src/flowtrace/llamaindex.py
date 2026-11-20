@@ -90,11 +90,18 @@ class LlamaIndexHandler(BaseCallbackHandler):  # type: ignore[valid-type]
         # Common payload keys used by LlamaIndex
         if "query_str" in payload:
             content["query"] = str(payload["query_str"])
-        if EventPayload.QUERY_STR in payload:  # type: ignore[attr-defined]
+        if (
+            hasattr(EventPayload, "QUERY_STR")
+            and EventPayload.QUERY_STR in payload  # type: ignore[attr-defined]
+        ):
             content["query"] = str(payload[EventPayload.QUERY_STR])  # type: ignore[attr-defined]
+
         if "prompt" in payload:
             content["prompt"] = str(payload["prompt"])
-        if EventPayload.PROMPT in payload:  # type: ignore[attr-defined]
+        if (
+            hasattr(EventPayload, "PROMPT")
+            and EventPayload.PROMPT in payload  # type: ignore[attr-defined]
+        ):
             content["prompt"] = str(payload[EventPayload.PROMPT])  # type: ignore[attr-defined]
 
         if is_end:
@@ -102,29 +109,53 @@ class LlamaIndexHandler(BaseCallbackHandler):  # type: ignore[valid-type]
                 if key in payload:
                     content["response"] = str(payload[key])
                     break
-            if EventPayload.RESPONSE in payload:  # type: ignore[attr-defined]
+            if (
+                hasattr(EventPayload, "RESPONSE")
+                and EventPayload.RESPONSE in payload  # type: ignore[attr-defined]
+            ):
                 content["response"] = str(payload[EventPayload.RESPONSE])  # type: ignore[attr-defined]
-            if EventPayload.COMPLETION in payload:  # type: ignore[attr-defined]
+            if (
+                hasattr(EventPayload, "COMPLETION")
+                and EventPayload.COMPLETION in payload  # type: ignore[attr-defined]
+            ):
                 content["response"] = str(payload[EventPayload.COMPLETION])  # type: ignore[attr-defined]
 
-        if "tool" in payload or EventPayload.TOOL in payload:  # type: ignore[attr-defined]
-            tool = payload.get("tool") or payload.get(EventPayload.TOOL)  # type: ignore[attr-defined]
-            content["tool"] = str(tool)
+        if "tool" in payload or (
+            hasattr(EventPayload, "TOOL")
+            and EventPayload.TOOL in payload  # type: ignore[attr-defined]
+        ):
+            tool = payload.get("tool")
+            if not tool and hasattr(EventPayload, "TOOL"):
+                tool = payload.get(EventPayload.TOOL)  # type: ignore[attr-defined]
+            if tool:
+                content["tool"] = str(tool)
 
         # Token counts (various possible keys)
-        for tk in ("total_tokens", "token_count", "prompt_tokens", EventPayload.TOTAL_TOKENS):
+        token_keys = ["total_tokens", "token_count", "prompt_tokens"]
+        if hasattr(EventPayload, "TOTAL_TOKENS"):
+            token_keys.append(EventPayload.TOTAL_TOKENS)  # type: ignore[attr-defined]
+        for tk in token_keys:
             if tk in payload and payload.get(tk):
                 content["tokens"] = int(payload[tk])
                 break
 
         if is_end and (
-            EventPayload.EXCEPTION in payload  # type: ignore[attr-defined]
+            (
+                hasattr(EventPayload, "EXCEPTION")
+                and EventPayload.EXCEPTION in payload  # type: ignore[attr-defined]
+            )
             or "error" in payload
             or "exception" in payload
         ):
-            exc = payload.get(EventPayload.EXCEPTION) or payload.get("error") or payload.get("exception")  # type: ignore[attr-defined]
-            content["error"] = str(exc)
-            content["status"] = "failed"
+            exc = payload.get("error") or payload.get("exception")
+            if (
+                hasattr(EventPayload, "EXCEPTION")
+                and EventPayload.EXCEPTION in payload  # type: ignore[attr-defined]
+            ):
+                exc = payload.get(EventPayload.EXCEPTION)  # type: ignore[attr-defined]
+            if exc:
+                content["error"] = str(exc)
+                content["status"] = "failed"
 
         return content
 
