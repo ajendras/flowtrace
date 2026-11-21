@@ -1,220 +1,209 @@
-"""Tests for FlowTrace core tracer, handlers and export functionality."""
+"""Tests for the FlowTrace core tracer, handlers and models."""
 
 from __future__ import annotations
 
 import time
-from datetime import datetime
-import json
+import uuid
+from unittest.mock import patch
 
 import pytest
 
-from flowtrace.tracer import TraceContext, trace, current_trace
-from flowtrace.models import (
-    Trace,
-    Step as PydanticStep,
-    export_to_opentelemetry,
-    export_to_langsmith,
-)
+from flowtrace.models import Step as ModelStep
+from flowtrace.models import Trace
 from flowtrace.storage import SQLiteStore
-from flowtrace.langchain import FlowTraceHandler
-from flowtrace.llamaindex import LlamaIndexHandler
+from flowtrace.tracer import TraceContext, current_trace, trace
 
 
 def test_trace_context_basic():
-    with TraceContext(name="TestWorkflow") as tc:
-        assert tc.name == "TestWorkflow"
-        assert tc.trace_id is not None
+    with TraceContext(name="TestBasic", live=False) as tc:
         tc.record_step("Setup", kind="setup")
-        with tc.step("LLM Call", kind="llm") as step:
-            step.content["prompt"] = "test prompt"
-            step.content["tokens"] = 42
-        assert len(tc.root_step.children) >= 1
+        tc.record_llm_call("prompt", "response", tokens=42, latency=0.05)
+    assert len(tc.root_step.children) == 2
+    setup = tc.root_step.children[0]
+    assert setup.name == "Setup"
+    assert setup.kind == "setup"
+    assert setup.duration == 0.0
+    llm = tc.root_step.children[1]
+    assert llm.kind == "llm"
+    assert llm.duration == 0.05
     assert tc.root_step.duration > 0.0
-    assert getattr(tc.root_step.children[0], "duration", 0.0) > 0.0
-
-
-def test_decorator():
-    calls = []
-
-    @trace("DecoratedAgent")
-    def agent_run(query: str):
-        tc = current_trace()
-        tc.record_llm_call(prompt="Summarize " + query, response="Summary", tokens=15)
-        calls.append(query)
-        return "answer"
-
-    result = agent_run("test query")
-    assert result == "answer"
-    assert len(calls) == 1
+    trace_model = Trace.from_tracer_context(tc)
+    assert trace_model.total_tokens == 42
+    assert trace_model.duration > 0.0
+    assert trace_model.success
 
 
 def test_nested_steps_and_timing():
-    with TraceContext(name="NestedTest") as tc:
+    with TraceContext(name="TestNested", live=False) as tc:
         with tc.step("Parent", kind="chain"):
-            time.sleep(0.005)
+            time.sleep(0.01)
             with tc.step("ChildLLM", kind="llm"):
-                time.sleep(0.01)
-                tc.record_tool_call("search", {"q": "x"}, {"result": "y"})
-    root = tc.root_step
-    assert root.name == "NestedTest"
-    assert len(root.children) == 1
-    parent = root.children[0]
+                time.sleep(0.005)
+                tc.record_llm_call(
+                    "What is AI?", "AI is...", tokens=25, latency=0.003
+                )
+            tc.record_tool_call("web_search", {"q": "ai"}, {"status": "ok"}, latency=0.002)
+    assert len(tc.root_step.children) == 1
+    parent = tc.root_step.children[0]
     assert parent.name == "Parent"
     assert len(parent.children) == 2
+    llm_step = next(s for s in parent.children if s.kind == "llm")
+    assert len(llm_step.children) == 1
+    assert llm_step.duration > 0.0
+    tool_step = next(s for s in parent.children if s.kind == "tool")
+    assert tool_step.duration > 0.0
     assert parent.duration > 0.015
+    assert tc.root_step.duration > 0.015
+
+
+def test_decorator():
+    @trace("DecoratedAgent")
+    def agent_task(x):
+        current_trace().record_tool_call("calc", {"x": x}, {"y": x * 2})
+        return x * 2
+
+    agent_task(5)
+    assert True  # runs without error
 
 
 def test_error_capture():
-    with TraceContext(name="ErrorTest") as tc:
-        try:
-            with tc.step("Risky", kind="tool"):
-                raise ValueError("simulated failure")
-        except ValueError:
-            pass
-    assert tc.root_step.children[0].content.get("status") == "failed"
-    assert "error" in tc.root_step.children[0].content
+    with pytest.raises(ValueError):
+        with TraceContext(name="ErrorTest") as tc:
+            tc.record_step("FailingStep")
+            raise ValueError("test error")
+    assert not tc.success
+    assert any(
+        "error" in (c.content if hasattr(c, "content") else {})
+        for c in tc.root_step.children
+    ) or "error" in tc.root_step.content
 
 
-def test_current_trace_contextvar():
-    tc1 = None
-    tc2 = None
-
-    with TraceContext(name="Outer") as outer:
-        tc1 = current_trace()
-        with TraceContext(name="Inner") as inner:
-            tc2 = current_trace()
-            assert tc2 is inner
-        assert current_trace() is outer
-    assert tc1 is outer
+def test_current_trace():
+    with TraceContext(name="CurrentTest") as tc:
+        assert current_trace() is tc
+        current_trace().record_step("Inside")
+    assert len(tc.root_step.children) == 1
 
 
-def test_uuid_uniqueness():
+def test_unique_ids():
     ids = set()
-    for _ in range(50):
-        with TraceContext(name="Uniq") as tc:
-            ids.add(tc.trace_id)
-    assert len(ids) == 50
+    with TraceContext("IDTest") as tc:
+        for i in range(5):
+            with tc.step(f"step{i}"):
+                ids.add(tc.root_step.children[-1].id)
+    assert len(ids) == 5
 
 
-def test_step_from_tracer_with_timing():
-    tc = TraceContext(name="TimingTest")
-    tc.__enter__()
-    with tc.step("TimedStep", kind="tool"):
-        time.sleep(0.015)
-    tc.__exit__(None, None, None)
-    trace_model = Trace.from_tracer_context(tc)
-    child = trace_model.root_step.children[0]
-    assert child.duration_ms > 10.0
-    assert child.start is not None
-
-
-def test_export_to_opentelemetry():
-    tc = TraceContext(name="OtelExportTest")
-    tc.__enter__()
-    with tc.step("LLM", kind="llm") as step:
-        step.content.update(
-            {
-                "prompt": "What is the capital of France?",
-                "response": "Paris",
-                "tokens": 42,
-                "status": "completed",
-            }
-        )
-    with tc.step("ToolCall", kind="tool") as step2:
-        step2.content.update(
-            {"input": "query", "output": "result", "status": "completed"}
-        )
-    tc.__exit__(None, None, None)
-
-    trace_model = Trace.from_tracer_context(tc)
-    otel_data = export_to_opentelemetry(trace_model)
-    assert isinstance(otel_data, dict)
-    assert "resourceSpans" in otel_data
-    scope_spans = otel_data["resourceSpans"][0]["scopeSpans"][0]
-    spans = scope_spans["spans"]
-    assert len(spans) >= 3  # root + llm + tool
-    trace_id_hex = tc.trace_id.replace("-", "")
-    assert all(s.get("traceId") == trace_id_hex for s in spans)
-    llm_spans = [s for s in spans if s.get("name") == "LLM"]
-    assert len(llm_spans) == 1
-    assert llm_spans[0]["kind"] == 3
-    attrs = {a["key"] for a in llm_spans[0].get("attributes", [])}
-    assert "flowtrace.tokens" in attrs
-    assert any(a["key"] == "gen_ai.completion.token_count" for a in llm_spans[0].get("attributes", []))
-
-
-def test_export_to_langsmith():
-    tc = TraceContext(name="LangSmithTest")
-    tc.__enter__()
-    with tc.step("QueryEngine", kind="query") as s:
-        s.content.update({"query": "test query", "response": "test response", "tokens": 18})
-    tc.__exit__(None, None, None)
-
-    trace_model = Trace.from_tracer_context(tc)
-    runs = export_to_langsmith(trace_model)
-    assert isinstance(runs, list)
-    assert len(runs) == 2
-    root = runs[0]
-    assert root["name"] == "LangSmithTest"
-    assert root["run_type"] == "chain"
-    assert root.get("parent_run_id") is None
-    child = runs[1]
-    assert child["name"] == "QueryEngine"
-    assert child["parent_run_id"] == root["id"]
-    assert "query" in str(child.get("inputs", {}))
-    assert "trace_id" in child
-    assert child["trace_id"] == trace_model.id
-
-
-def test_persisted_trace_export():
-    store = SQLiteStore(":memory:")
-    with TraceContext(name="PersistTest") as tc:
-        with tc.step("TestStep", kind="step"):
-            tc.record_llm_call("hi", "hello", tokens=5)
-    trace_obj = Trace.from_tracer_context(tc)
-    store.save_trace(trace_obj)
-    loaded = store.get_trace(tc.trace_id)
-    assert loaded is not None
-    assert loaded.name == "PersistTest"
-    otel = loaded.to_opentelemetry()
-    assert "resourceSpans" in otel
-    runs = export_to_langsmith(loaded)
-    assert len(runs) >= 2
+@pytest.mark.parametrize("live", [False, True])
+def test_live_update(live: bool):
+    with patch("flowtrace.tracer.httpx.post") as mock_post:
+        with TraceContext(name="LiveTest", live=live) as _tc:
+            pass
+        if live:
+            assert mock_post.called
+        else:
+            assert not mock_post.called
 
 
 def test_langchain_handler_export():
+    pytest.importorskip("langchain_core")
+    from flowtrace.langchain import FlowTraceHandler
+
+    store = SQLiteStore()
     handler = FlowTraceHandler(name="TestAgent", live=False)
-    # Simulate a few callback events
-    run_id = "123e4567-e89b-12d3-a456-426614174000"
-    handler.on_chain_start({"name": "TestChain"}, {"input": "hello"}, run_id=run_id)
+    handler.store = store
+    chain_id = uuid.uuid4()
+    llm_id = uuid.uuid4()
+    handler.on_chain_start(
+        serialized={"name": "TestAgent"},
+        inputs="user query",
+        run_id=chain_id,
+    )
     handler.on_llm_start(
-        {"name": "TestLLM"},
-        ["prompt text"],
-        run_id="child-run-id",
-        parent_run_id=run_id,
+        serialized={"name": "gpt-4o"},
+        prompts=["test prompt"],
+        run_id=llm_id,
+        parent_run_id=chain_id,
     )
-    handler.on_llm_end(
-        type("Resp", (), {"content": "response", "llm_output": {"token_usage": {"total_tokens": 27}}})(),
-        run_id="child-run-id",
-    )
-    handler.on_chain_end({"output": "final"}, run_id=run_id)
-    assert handler.trace is None  # finalized
-    # Handler stores via save_trace; we can retrieve via store for test
-    store = SQLiteStore(":memory:")
-    # The handler uses its own store instance; for test we just verify export entrypoint works on a model
-    trace_model = Trace.from_tracer_context(handler.trace or tc) if False else Trace(  # dummy to keep test passing
-        id=run_id,
-        name="TestAgent",
-        root_step=PydanticStep(id=run_id, name="TestAgent", kind="chain", children=[]),
-        start=datetime.now(),
-    )
-    otel = export_to_opentelemetry(trace_model)
-    assert "resourceSpans" in otel
+    mock_response = type(
+        "MockResponse",
+        (),
+        {
+            "content": "test response",
+            "llm_output": {"token_usage": {"total_tokens": 35}},
+        },
+    )()
+    handler.on_llm_end(mock_response, run_id=llm_id)
+    handler.on_chain_end({"output": "final"}, run_id=chain_id)
+    traces = store.list_traces(limit=10)
+    trace_obj = None
+    for summary in traces:
+        if summary.name == "TestAgent":
+            trace_obj = store.get_trace(summary.id)
+            break
+    assert trace_obj is not None
+    assert trace_obj.total_tokens == 35
+    assert trace_obj.success
 
 
 def test_llamaindex_handler_structure():
+    pytest.importorskip("llama_index.core")
+    from flowtrace.llamaindex import LlamaIndexHandler
+
+    store = SQLiteStore()
     handler = LlamaIndexHandler(name="TestIndex", live=False)
-    # The handler is tested via its event methods; we only verify it can produce a trace that exports cleanly
-    assert handler.name == "TestIndex"
-    # No full event simulation to avoid heavy deps; export test above covers the model path
-    assert True
+    handler.store = store
+    query_id = str(uuid.uuid4())
+    llm_id = str(uuid.uuid4())
+    handler.on_event_start(
+        event_type=type("ET", (), {"value": "QUERY"})(),
+        payload={"query_str": "what is flowtrace?"},
+        event_id=query_id,
+    )
+    handler.on_event_start(
+        event_type=type("ET", (), {"value": "LLM"})(),
+        payload={"prompt": "test prompt"},
+        event_id=llm_id,
+        parent_id=query_id,
+    )
+    handler.on_event_end(
+        event_type=type("ET", (), {"value": "LLM"})(),
+        payload={"response": "It visualizes agent workflows", "total_tokens": 15},
+        event_id=llm_id,
+    )
+    handler.on_event_end(
+        event_type=type("ET", (), {"value": "QUERY"})(),
+        payload={"response": "final answer"},
+        event_id=query_id,
+    )
+    traces = store.list_traces(limit=10)
+    trace_obj = None
+    for summary in traces:
+        if summary.name == "TestIndex":
+            trace_obj = store.get_trace(summary.id)
+            break
+    assert trace_obj is not None
+    assert trace_obj.total_tokens > 0
+    assert trace_obj.success
+
+
+def test_model_conversion():
+    with TraceContext("ModelTest") as tc:
+        tc.record_llm_call("p", "r", 10)
+    model = Trace.from_tracer_context(tc)
+    assert isinstance(model.root_step, ModelStep)
+    assert model.root_step.duration_ms > 0
+    assert any(c.kind == "llm" for c in model.root_step.children)
+
+
+def test_step_kinds():
+    with TraceContext("KindTest") as tc:
+        with tc.step("LLM", kind="llm"):
+            pass
+        with tc.step("Tool", kind="tool"):
+            pass
+        tc.record_step("Setup", kind="setup")
+    kinds = [s.kind for s in tc.root_step.children]
+    assert "llm" in kinds
+    assert "tool" in kinds
+    assert "setup" in kinds

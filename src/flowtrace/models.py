@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
 
 def _uuid_to_hex(uuid_str: str, length: int = 32) -> str:
@@ -53,8 +53,11 @@ class Step(BaseModel):
     model_config = ConfigDict(
         from_attributes=True,
         arbitrary_types_allowed=True,
-        json_encoders={datetime: lambda dt: dt.isoformat() if dt else None},
     )
+
+    @field_serializer("start")
+    def serialize_start(self, start: Optional[datetime]) -> Optional[str]:
+        return start.isoformat() if start else None
 
     @classmethod
     def from_tracer(
