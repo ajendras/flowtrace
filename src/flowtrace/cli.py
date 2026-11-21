@@ -1,18 +1,19 @@
 """Command-line interface for FlowTrace.
 
-Provides ``flowtrace serve``, ``list``, ``view``, and ``clear`` commands
+Provides ``flowtrace serve``, ``list``, ``view``, ``clear`` and ``export`` commands
 with clear output and input validation. Uses the shared SQLiteStore for
 all persistence operations.
 """
 
 from __future__ import annotations
 
+import json
 import sys
 from typing import Optional
 
 import typer
 
-from . import run_server
+from . import run_server, export_to_opentelemetry, export_to_langsmith
 from .storage import SQLiteStore
 
 app = typer.Typer(
@@ -117,6 +118,42 @@ def view(trace_id: str = typer.Argument(..., help="Trace ID to inspect")) -> Non
             print_step(child, depth + 1)
 
     print_step(trace.root_step)
+
+
+@app.command()
+def export(
+    trace_id: str = typer.Argument(..., help="ID of the trace to export"),
+    fmt: str = typer.Option(
+        "otel", "--format", "-f", help="Output format (otel or langsmith)"
+    ),
+    output: Optional[str] = typer.Option(
+        None, "--output", "-o", help="Write to file instead of stdout"
+    ),
+) -> None:
+    """Export a trace to OpenTelemetry or LangSmith compatible format."""
+    store = SQLiteStore()
+    trace = store.get_trace(trace_id)
+    if trace is None:
+        typer.secho(f"Trace '{trace_id}' not found.", fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+    if fmt.lower() in ("otel", "opentelemetry", "otlp"):
+        data = export_to_opentelemetry(trace)
+    elif fmt.lower() in ("langsmith",):
+        data = export_to_langsmith(trace)
+    else:
+        typer.secho(
+            f"Unknown format: {fmt}. Use 'otel' or 'langsmith'.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(1)
+
+    if output is None:
+        typer.echo(json.dumps(data, indent=2))
+    else:
+        with open(output, "w") as f:
+            json.dump(data, f, indent=2)
+        typer.echo(f"Trace exported to {output} in {fmt} format.")
 
 
 @app.command()

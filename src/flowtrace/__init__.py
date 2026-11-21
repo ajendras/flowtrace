@@ -1,7 +1,8 @@
 """FlowTrace - Visualizes and debugs multi-step LLM agent workflows.
 
 Zero-config tracing for Python agents with interactive SVG graphs,
-prompt inspection, tool call browser, and local SQLite persistence.
+prompt inspection, tool call browser, local SQLite persistence,
+and export to OpenTelemetry / LangSmith formats.
 """
 
 from __future__ import annotations
@@ -12,7 +13,17 @@ from typing import Any, Callable, Optional, Union
 from .tracer import TraceContext, current_trace, trace
 
 __version__ = "0.1.0"
-__all__ = ["trace", "TraceContext", "current_trace", "run_server", "FlowTraceHandler", "LlamaIndexHandler"]
+__all__ = [
+    "trace",
+    "TraceContext",
+    "current_trace",
+    "run_server",
+    "FlowTraceHandler",
+    "LlamaIndexHandler",
+    "Trace",
+    "export_to_opentelemetry",
+    "export_to_langsmith",
+]
 
 
 def run_server(port: int = 8080, host: str = "127.0.0.1") -> None:
@@ -66,4 +77,19 @@ def __getattr__(name: str) -> Any:
 
         globals()["llamaindex"] = _llamaindex
         return _llamaindex
+    if name == "Trace":
+        from .models import Trace as _Trace
+
+        globals()["Trace"] = _Trace
+        return _Trace
+    if name == "export_to_opentelemetry":
+        from .models import export_to_opentelemetry as _export_otel
+
+        globals()["export_to_opentelemetry"] = _export_otel
+        return _export_otel
+    if name == "export_to_langsmith":
+        from .models import export_to_langsmith as _export_langsmith
+
+        globals()["export_to_langsmith"] = _export_langsmith
+        return _export_langsmith
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

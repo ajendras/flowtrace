@@ -28,6 +28,7 @@ AI agents chain dozens of LLM calls, tool invocations, memory reads, and nested 
 - Interactive SVG node-link diagrams that visualise nesting, timing, step kinds, and data flow on a strict grid
 - Clickable inspector panels showing raw prompts, responses, token counts, tool arguments, latency, and errors
 - Local SQLite persistence with history browsing, trace replay (mocked tools), HTTP ingestion for non-Python agents, and summary statistics
+- Export traces to OpenTelemetry (OTLP) and LangSmith compatible formats for interoperability with other observability platforms
 
 ## 🎬 Demo
 
@@ -82,6 +83,12 @@ Token usage, success rate, slowest steps and failure patterns
 <td align="center" valign="top" colspan="3">
 🔄 <b>Side-by-side comparison</b><br>
 Select any two traces to view aligned SVG graphs, stats, and computed differences
+</td>
+</tr>
+<tr>
+<td align="center" valign="top" colspan="3">
+🌐 <b>Standards export</b><br>
+OpenTelemetry OTLP JSON and LangSmith run format (CLI, API, Python)
 </td>
 </tr>
 </table>
@@ -265,6 +272,40 @@ In the dashboard, use the checkboxes next to traces in the history list to selec
 
 Exit comparison mode with the **Single View** button to return to the standard inspector+graph layout. This makes it trivial to spot regressions, performance changes, or differences in agent behaviour across runs.
 
+### Export traces to OpenTelemetry and LangSmith
+
+Any saved trace can be exported to OpenTelemetry OTLP JSON (for collectors, Jaeger, Tempo, etc.) or LangSmith's run format.
+
+**Via CLI:**
+
+```bash
+flowtrace export 8f3c9a2b-... --format otel --output trace.json
+flowtrace export 8f3c9a2b-... --format langsmith --output runs.json
+```
+
+**In Python:**
+
+```python
+from flowtrace import export_to_opentelemetry, export_to_langsmith
+from flowtrace.storage import SQLiteStore
+
+store = SQLiteStore()
+trace = store.get_trace("8f3c9a2b-...")
+
+otel_data = export_to_opentelemetry(trace)
+langsmith_runs = export_to_langsmith(trace)
+
+import json
+with open("otel.json", "w") as f:
+    json.dump(otel_data, f, indent=2)
+with open("langsmith.json", "w") as f:
+    json.dump(langsmith_runs, f, indent=2)
+```
+
+The OTEL export produces a full `resourceSpans` payload with proper trace/span IDs, timestamps (derived from wall-clock + perf_counter offsets), attributes, status and semantic conventions (e.g. `gen_ai.completion.token_count`). The LangSmith export produces a flat list of runs with `run_type`, `inputs`/`outputs`, `parent_run_id`, `trace_id`, `extra`, etc.
+
+The `/api/traces/{id}/export?format=otel` endpoint is also available.
+
 ### CLI inspection
 
 ```bash
@@ -402,7 +443,7 @@ The test suite (`tests/test_tracer.py`) covers `TraceContext` nested step constr
 - [x] Build side-by-side trace comparison view
 - [x] Add search across prompts and tool outputs in trace history
 - [x] Create first-party LlamaIndex integration adapter
-- [ ] Export traces to OpenTelemetry / LangSmith compatible format
+- [x] Export traces to OpenTelemetry / LangSmith compatible format
 - [ ] Add latency flamegraph and per-step token analytics dashboard
 - [ ] Support manual annotations and comments on any step
 - [ ] Implement trace replay with swapped model parameters or mocked outputs

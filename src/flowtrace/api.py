@@ -169,6 +169,34 @@ def compare_traces(
     )
 
 
+@router.get("/traces/{trace_id}/export")
+def export_trace_endpoint(
+    trace_id: str,
+    format: str = "otel",
+    store: SQLiteStore = Depends(get_store),
+) -> Any:
+    """Export trace in OpenTelemetry or LangSmith compatible format.
+
+    ``?format=otel`` returns OTLP JSON; ``?format=langsmith`` returns a list of runs.
+    """
+    trace = store.get_trace(trace_id)
+    if trace is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Trace with id '{trace_id}' not found",
+        )
+
+    if format.lower() in ("otel", "opentelemetry", "otlp"):
+        return trace.to_opentelemetry()
+    if format.lower() in ("langsmith",):
+        return trace.to_langsmith()
+
+    raise HTTPException(
+        status_code=400,
+        detail="format must be 'otel' or 'langsmith'",
+    )
+
+
 @router.websocket("/ws/traces/{trace_id}")
 async def websocket_trace_stream(websocket: WebSocket, trace_id: str):
     """WebSocket endpoint for live trace streaming during runs.
