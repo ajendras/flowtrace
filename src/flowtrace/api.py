@@ -197,6 +197,28 @@ def export_trace_endpoint(
     )
 
 
+@router.get("/traces/{trace_id}/analytics")
+def get_trace_analytics(
+    trace_id: str, store: SQLiteStore = Depends(get_store)
+) -> Dict[str, Any]:
+    """Return computed data for the latency flamegraph and per-step token
+    analytics dashboard.
+    """
+    trace = store.get_trace(trace_id)
+    if trace is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Trace with id '{trace_id}' not found",
+        )
+    return {
+        "flame_data": trace.get_flame_data(),
+        "token_data": trace.get_token_data(),
+        "total_duration_ms": round(trace.duration * 1000, 2),
+        "total_tokens": trace.total_tokens,
+        "trace_name": trace.name,
+    }
+
+
 @router.websocket("/ws/traces/{trace_id}")
 async def websocket_trace_stream(websocket: WebSocket, trace_id: str):
     """WebSocket endpoint for live trace streaming during runs.

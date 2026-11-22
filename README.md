@@ -38,17 +38,21 @@ AI agents chain dozens of LLM calls, tool invocations, memory reads, and nested 
 
 <table>
 <tr>
-<td align="center" valign="top" width="33%">
+<td align="center" valign="top" width="25%">
 🔌 <b>Zero-config tracing</b><br>
 Decorator, context manager, and official LangChain + LlamaIndex handlers
 </td>
-<td align="center" valign="top" width="33%">
+<td align="center" valign="top" width="25%">
 📈 <b>Interactive SVG graphs</b><br>
 Strict hierarchical grid showing flow, nesting and timing
 </td>
-<td align="center" valign="top" width="33%">
+<td align="center" valign="top" width="25%">
 🔎 <b>Prompt inspector</b><br>
 Click any node for raw prompts, responses, tokens and metadata
+</td>
+<td align="center" valign="top" width="25%">
+🔥 <b>Latency flamegraph &amp; token analytics</b><br>
+Interactive stacked timeline + per-LLM token bar charts with click-to-inspect
 </td>
 </tr>
 <tr>
@@ -64,12 +68,12 @@ SQLite store with history, content search across prompts &amp; tool outputs, fil
 ▶️ <b>Trace replay</b><br>
 Re-execute saved traces with mocked tools
 </td>
-</tr>
-<tr>
 <td align="center" valign="top">
 📡 <b>HTTP ingestion</b><br>
 POST endpoint for non-Python or remote agents
 </td>
+</tr>
+<tr>
 <td align="center" valign="top">
 🔴 <b>Live streaming</b><br>
 WebSocket endpoint — traces appear live as they run
@@ -78,15 +82,13 @@ WebSocket endpoint — traces appear live as they run
 📊 <b>Summary statistics</b><br>
 Token usage, success rate, slowest steps and failure patterns
 </td>
-</tr>
-<tr>
-<td align="center" valign="top" colspan="3">
+<td align="center" valign="top" colspan="2">
 🔄 <b>Side-by-side comparison</b><br>
 Select any two traces to view aligned SVG graphs, stats, and computed differences
 </td>
 </tr>
 <tr>
-<td align="center" valign="top" colspan="3">
+<td align="center" valign="top" colspan="4">
 🌐 <b>Standards export</b><br>
 OpenTelemetry OTLP JSON and LangSmith run format (CLI, API, Python)
 </td>
@@ -261,6 +263,16 @@ The handler automatically:
 - Parses payload for prompts, responses, tokens, queries and errors
 - Builds a nested tree using event IDs and persists on root completion
 
+### Analytics dashboard
+
+After selecting a trace, click the **Analytics** tab (or call the `/api/traces/{id}/analytics` endpoint directly). You will see:
+
+- **Latency flamegraph** — interactive SVG timeline with horizontal bars sized by duration, vertically stacked by nesting depth, colored by step kind. Hover and click any bar to jump to the inspector.
+- **Per-step token analytics** — SVG bar chart of all LLM calls sorted by token usage, with numeric labels and a summary panel.
+- A sortable table of every step with latency and token counts (click rows to inspect).
+
+All visualizations are built with vanilla SVG + JS and stay consistent with the Swiss-minimal design.
+
 ### Side-by-side trace comparison
 
 In the dashboard, use the checkboxes next to traces in the history list to select exactly two traces, then click **Compare** in the header. The main view switches to a split layout with:
@@ -391,9 +403,9 @@ flowchart TD
     Tracer --> Models["models.py<br/>Pydantic Trace + Step (with .from_tracer_context)"]
     Models --> Storage["storage.py<br/>SQLiteStore (save_trace, get_trace, list_traces)"]
     Storage <--> DB["flowtrace.db"]
-    Storage --> API["api.py<br/>FastAPI router (/api/traces, /graph, POST ingest, POST /live, WS /ws/traces/{id}, GET /compare/{id1}/{id2})"]
+    Storage --> API["api.py<br/>FastAPI router (/api/traces, /graph, POST ingest, POST /live, WS /ws/traces/{id}, GET /compare/{id1}/{id2}, GET /analytics/{id})"]
     API --> Server["server.py<br/>create_app() + Jinja templates + static mount"]
-    Server --> UI["templates/index.html + static/script.js<br/>SVG renderer + inspector + live WS client + side-by-side compare"]
+    Server --> UI["templates/index.html + static/script.js<br/>SVG renderer + inspector + live WS client + side-by-side compare + flamegraph + token chart"]
     CLI["cli.py<br/>serve, list, view, clear"] --> Server
     External["Non-Python agents"] --> API
     current_trace["current_trace() ContextVar"] -.-> Tracer
@@ -419,7 +431,7 @@ flowchart TD
 │   └── ...
 ├── templates/index.html           # Single-page Swiss-minimal UI (12-column grid, sidebar, SVG canvas, inspector)
 ├── static/
-│   ├── script.js                  # Vanilla JS: loadTraces(), renderGraph() (strict grid SVG), onNodeClick(), inspector
+│   ├── script.js                  # Vanilla JS: loadTraces(), renderGraph() (strict grid SVG), onNodeClick(), inspector, renderFlamegraph(), renderTokenChart()
 │   └── styles.css                 # Strict Swiss design: #e30613 accent, hairline rules, system-ui, no shadows
 ├── tests/test_tracer.py           # pytest suite for context, decorator, nesting, timing, errors, uniqueness, LangChain + LlamaIndex handlers
 └── examples/agent_example.py      # Runnable mock research agent demonstrating realistic usage + LangChain handler
@@ -432,7 +444,7 @@ pip install -e ".[test,langchain,llamaindex]"
 pytest
 ```
 
-The test suite (`tests/test_tracer.py`) covers `TraceContext` nested step construction, `@trace` decorator behaviour (both top-level and nested), LLM/tool recording, timing accuracy, error capture, `current_trace()` contextvar semantics, UUID uniqueness, and both official handlers (`FlowTraceHandler` and `LlamaIndexHandler` with mocked callbacks and store).
+The test suite (`tests/test_tracer.py`) covers `TraceContext` nested step construction, `@trace` decorator behaviour (both top-level and nested), LLM/tool recording, timing accuracy, error capture, `current_trace()` contextvar semantics, UUID uniqueness, both official handlers (`FlowTraceHandler` and `LlamaIndexHandler` with mocked callbacks and store), and the new analytics methods on `Trace`.
 
 ## 📍 Roadmap
 
@@ -444,7 +456,7 @@ The test suite (`tests/test_tracer.py`) covers `TraceContext` nested step constr
 - [x] Add search across prompts and tool outputs in trace history
 - [x] Create first-party LlamaIndex integration adapter
 - [x] Export traces to OpenTelemetry / LangSmith compatible format
-- [ ] Add latency flamegraph and per-step token analytics dashboard
+- [x] Add latency flamegraph and per-step token analytics dashboard
 - [ ] Support manual annotations and comments on any step
 - [ ] Implement trace replay with swapped model parameters or mocked outputs
 - [ ] Add plugin system for custom step visualizers and badges

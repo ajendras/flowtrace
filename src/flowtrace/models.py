@@ -148,6 +148,66 @@ class Trace(BaseModel):
             total_tokens=total_tokens,
         )
 
+    def get_flame_data(self) -> List[Dict[str, Any]]:
+        """Return list of steps with relative timing for flamegraph rendering.
+
+        Each entry contains id, name, kind, duration_ms, start_ms (relative to
+        trace start), depth and tokens (when present). Used by the interactive
+        SVG flamegraph in the dashboard.
+        """
+        flame: List[Dict[str, Any]] = []
+
+        def recurse(step: Step, depth: int = 0) -> None:
+            start_ms = 0.0
+            if step.start and self.start:
+                delta = step.start - self.start
+                start_ms = delta.total_seconds() * 1000
+            flame.append(
+                {
+                    "id": step.id,
+                    "name": step.name,
+                    "kind": step.kind,
+                    "duration_ms": step.duration_ms,
+                    "start_ms": round(start_ms, 2),
+                    "depth": depth,
+                    "tokens": int(step.content.get("tokens", 0))
+                    if isinstance(step.content, dict)
+                    else 0,
+                }
+            )
+            for child in step.children:
+                recurse(child, depth + 1)
+
+        recurse(self.root_step)
+        return flame
+
+    def get_token_data(self) -> List[Dict[str, Any]]:
+        """Return list of LLM steps with token counts for the analytics chart.
+
+        Sorted descending by token count. Used by the per-step token bar chart.
+        """
+        tokens: List[Dict[str, Any]] = []
+
+        def recurse(step: Step) -> None:
+            if (
+                step.kind == "llm"
+                and isinstance(step.content, dict)
+                and (t := step.content.get("tokens"))
+            ):
+                tokens.append(
+                    {
+                        "id": step.id,
+                        "name": step.name,
+                        "tokens": int(t),
+                        "duration_ms": step.duration_ms,
+                    }
+                )
+            for child in step.children:
+                recurse(child)
+
+        recurse(self.root_step)
+        return sorted(tokens, key=lambda x: x["tokens"], reverse=True)
+
     def to_opentelemetry(self) -> Dict[str, Any]:
         """Export to OpenTelemetry compatible OTLP JSON format.
 
