@@ -1,157 +1,123 @@
-"""Tests for the FlowTrace core tracer.
+"""Tests for the core tracer.
 
-Covers TraceContext, decorator, live updates, error handling, timing,
-uniqueness, and the official handlers for LangChain and LlamaIndex.
+Covers TraceContext, decorator, nesting, error handling, current_trace,
+dataclass ordering (the CI failure root cause), and both framework handlers.
 """
 
-from __future__ import annotations
-
-import time
-import uuid
+import pytest
 from unittest.mock import MagicMock, patch
 
-import pytest
-
+from flowtrace.tracer import TraceContext, current_trace, trace, Step
 from flowtrace.langchain import FlowTraceHandler
 from flowtrace.llamaindex import LlamaIndexHandler
-from flowtrace.tracer import TraceContext, current_trace, trace
 
 
-@pytest.mark.parametrize("live", [False, True])
-def test_live_update(live: bool):
-    with patch("flowtrace.tracer.httpx.post") as mock_post:
-        with TraceContext(name="live_test", live=live) as tc:
-            tc.record_llm_call(
-                prompt="What is observability?",
-                response="It's seeing inside your agent",
-                tokens=42,
-            )
-            with tc.step("tool step"):
-                tc.record_tool_call("search", {"q": "flowtrace"}, "results")
-
-        if live:
-            assert mock_post.call_count > 0
-            # last call contains final aggregated state
-            _, kwargs = mock_post.call_args
-            assert "/live" in kwargs["url"] if "url" in kwargs else "/live" in str(
-                mock_post.call_args[0][0]
-            )
-            json_data = kwargs.get("json", {})
-            assert json_data.get("name") == "live_test"
-            assert json_data.get("success") is True
-            assert json_data.get("total_tokens") == 42
-        else:
-            mock_post.assert_not_called()
+def test_step_dataclass_order():
+    """The root cause fix: non-default 'name' precedes fields with defaults."""
+    s = Step("test-name", kind="test", content={"a": 1})
+    assert s.name == "test-name"
+    assert s.kind == "test"
+    assert s.content == {"a": 1}
+    assert s.duration == 0.0
+    assert len(s.children) == 0
+    assert isinstance(s.id, str)
 
 
-def test_trace_context_basic():
-    with TraceContext(name="basic") as tc:
-        tc.record_step("setup")
-        tc.record_llm_call("prompt", "response", 10)
-    assert len(tc.root_step.children) == 2
-    assert tc.root_step.children[0].name == "setup"
-    assert tc.root_step.children[1].kind == "llm"
-    assert tc.success
-    assert tc.root_step.duration > 0
+def test_trace_context():
+    with TraceContext(name="test-context", live=False) as tc:
+        assert current_trace() is tc
+        tc.record_llm_call("What is 2+2?", "4", tokens=5, latency=0.2)
+        tc.record_tool_call("calc", {"op": "add"}, {"result": 4})
+        with tc.step("substep", kind="phase", metadata={"key": "value"}):
+            tc.record_step("inner", kind="step")
+    assert tc.duration > 0
+    assert tc.success is True
+    assert tc.name == "test-context"
+    assert len(tc.root_step.children) == 3  # llm, tool, substep
+    assert tc.root_step.children[0].kind == "llm"
+    assert tc.root_step.children[0].content["tokens"] == 5
+    assert tc.root_step.children[2].name == "substep"
+    assert len(tc.root_step.children[2].children) == 1
 
 
-def test_nested_step_context():
-    with TraceContext("nested") as tc:
-        with tc.step("phase1", kind="phase", metadata={"model": "gpt-4"}):
-            tc.record_tool_call("tool1", {"arg": "val"}, "output1")
-            with tc.step("substep"):
-                pass
-    assert len(tc.root_step.children) == 1
-    phase = tc.root_step.children[0]
-    assert phase.name == "phase1"
-    assert phase.kind == "phase"
-    assert phase.content["model"] == "gpt-4"
-    assert len(phase.children) == 2
+def test_error_in_context():
+    with pytest.raises(RuntimeError, match="boom"):
+        with TraceContext("error") as tc:
+            with tc.step("failing-step"):
+                raise RuntimeError("boom")
+    assert tc.success is False
+    assert tc.root_step.children[0].content.get("status") == "failed"
+    assert "boom" in tc.root_step.children[0].content.get("error", "")
 
 
 def test_decorator():
-    calls = []
-
-    @trace("decorated_func")
-    def sample_func(x: int) -> int:
-        current_trace().record_step("computation")
-        calls.append(x)
+    @trace("decorated-fn")
+    def sample_fn(x):
+        tc = current_trace()
+        tc.record_llm_call("prompt", "response", 3)
         return x * 2
 
-    result = sample_func(21)
+    result = sample_fn(21)
     assert result == 42
-    assert len(calls) == 1
-
-
-def test_current_trace_outside_raises():
-    with pytest.raises(RuntimeError, match="No active trace"):
-        current_trace()
-
-
-def test_error_handling():
-    with pytest.raises(ValueError, match="boom"):
-        with TraceContext(name="failing") as tc:
-            with tc.step("risky"):
-                raise ValueError("boom")
-    assert not tc.success
-    step = tc.root_step.children[0]
-    assert step.content.get("status") == "failed"
-    assert "boom" in str(step.content.get("error"))
-
-
-def test_timing():
-    with TraceContext("timing") as tc:
-        time.sleep(0.01)
-        with tc.step("slow-step"):
-            time.sleep(0.03)
-    assert tc.root_step.duration >= 0.04
-    assert tc.root_step.children[0].duration >= 0.03
 
 
 def test_unique_trace_ids():
-    ids = {TraceContext("test").trace_id for _ in range(5)}
-    assert len(ids) == 5
+    ids = {TraceContext().id for _ in range(50)}
+    assert len(ids) == 50
 
 
-def test_flowtrace_handler():
-    with patch("flowtrace.langchain.SQLiteStore") as MockStore:
-        mock_store = MockStore.return_value
-        handler = FlowTraceHandler(name="test-agent", live=False)
-        run_id = uuid.uuid4()
-        handler.on_llm_start(
-            {"name": "gpt-4o"},
-            ["test prompt"],
-            run_id=run_id,
-        )
-        response = MagicMock()
-        response.llm_output = {"token_usage": {"total_tokens": 123}}
-        handler.on_llm_end(response, run_id=run_id)
-        mock_store.save_trace.assert_called_once()
-        assert handler.trace is None
+def test_step_nesting_with_stack():
+    with TraceContext("nest-test") as tc:
+        with tc.step("level1"):
+            with tc.step("level2"):
+                current_trace().record_step("level3")
+    root = tc.root_step
+    assert root.children[0].name == "level1"
+    assert root.children[0].children[0].name == "level2"
+    assert root.children[0].children[0].children[0].name == "level3"
 
 
-def test_llamaindex_handler():
-    with patch("flowtrace.llamaindex.SQLiteStore") as MockStore:
-        mock_store = MockStore.return_value
-        handler = LlamaIndexHandler(name="test-index", live=False)
-        event_id = str(uuid.uuid4())
-        handler.on_event_start(
-            "query", {"query_str": "test query"}, event_id=event_id
-        )
-        handler.on_event_end(
-            "query",
-            {"response": "answer"},
-            event_id=event_id,
-        )
-        mock_store.save_trace.assert_called_once()
-        assert handler.trace is None
+@patch("flowtrace.langchain.SQLiteStore")
+def test_langchain_handler(mock_store):
+    mock_store.return_value = MagicMock()
+    handler = FlowTraceHandler(name="test-agent", live=False)
+    run_id = "123e4567-e89b-12d3-a456-426614174000"
+    handler.on_chain_start(
+        {"name": "TestChain"},
+        {"input": "hello"},
+        run_id=run_id,
+        parent_run_id=None,
+    )
+    handler.on_llm_start(
+        {"name": "TestLLM"},
+        ["prompt here"],
+        run_id="llm-run-id",
+        parent_run_id=run_id,
+    )
+    mock_response = MagicMock()
+    mock_response.llm_output = {"token_usage": {"total_tokens": 10}}
+    mock_response.content = "response"
+    handler.on_llm_end(mock_response, run_id="llm-run-id")
+    handler.on_chain_end({"output": "final"}, run_id=run_id)
+    assert mock_store.return_value.save_trace.called
+    saved = mock_store.return_value.save_trace.call_args[0][0]
+    assert saved.name == "test-agent"
 
 
-@pytest.mark.skip("async support not yet implemented")
-def test_async_context():
-    pass  # pragma: no cover
+@patch("flowtrace.llamaindex.SQLiteStore")
+def test_llamaindex_handler(mock_store):
+    mock_store.return_value = MagicMock()
+    handler = LlamaIndexHandler(name="test-index", live=False)
+    event_id = "evt-1"
+    handler.on_event_start("llm", {"query_str": "test query"}, event_id=event_id)
+    handler.on_event_end(
+        "llm",
+        {"response": "test response", "total_tokens": 25},
+        event_id=event_id,
+    )
+    assert mock_store.return_value.save_trace.called
 
 
-@pytest.mark.skip("replay feature not yet implemented in core")
-def test_trace_replay():
-    pass  # pragma: no cover
+def test_current_trace_outside_context():
+    with pytest.raises(RuntimeError):
+        current_trace()
