@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer
+import uuid
 
 
 def _uuid_to_hex(uuid_str: str, length: int = 32) -> str:
@@ -38,365 +39,203 @@ def _to_otel_attribute_value(value: Any) -> Dict[str, Any]:
 class Step(BaseModel):
     """A node in the execution trace.
 
-    Mirrors the structure of tracer.Step.to_dict() for API responses,
-    graph rendering and persistence. Fully recursive.
+    Supports manual annotations/comments via ``annotate()`` on the tracer Step
+    or via the ``/annotate`` API endpoint.
     """
-
     id: str
     name: str
-    kind: str
+    kind: str = "step"
     content: Dict[str, Any] = Field(default_factory=dict)
+    duration: float = 0.0
     children: List["Step"] = Field(default_factory=list)
-    duration_ms: float = 0.0
-    start: Optional[datetime] = Field(default=None)
+    annotations: List[Dict[str, Any]] = Field(default_factory=list)
 
     model_config = ConfigDict(
         from_attributes=True,
         arbitrary_types_allowed=True,
     )
 
-    @field_serializer("start")
-    def serialize_start(self, start: Optional[datetime]) -> Optional[str]:
-        return start.isoformat() if start else None
-
     @classmethod
-    def from_tracer(
-        cls, tracer_step: Any, trace_start: Optional[datetime] = None, root_perf_start: float = 0.0
-    ) -> Step:
-        """Convert tracer.Step dataclass (and its children) into a Pydantic model.
-
-        If trace_start and root_perf_start are provided, computes wall-clock
-        start times for OTEL/LangSmith timestamp accuracy.
-        """
-        if tracer_step is None:
-            return cls(id="missing", name="missing", kind="error")
-
-        children = [
-            cls.from_tracer(child, trace_start, root_perf_start)
-            for child in getattr(tracer_step, "children", [])
-        ]
-        duration = getattr(tracer_step, "duration", 0.0)
-        perf_start = getattr(tracer_step, "start", root_perf_start)
-        start = None
-        if trace_start is not None:
-            offset = perf_start - root_perf_start
-            start = trace_start + timedelta(seconds=offset)
-
+    def from_tracer_step(cls, step: Any) -> "Step":
+        """Convert a tracer.py dataclass Step into a Pydantic model."""
+        if isinstance(step, dict):
+            return cls.model_validate(step)
         return cls(
-            id=tracer_step.id,
-            name=tracer_step.name,
-            kind=tracer_step.kind,
-            content=getattr(tracer_step, "content", {}).copy(),
-            children=children,
-            duration_ms=round(duration * 1000, 2),
-            start=start,
+            id=step.id,
+            name=step.name,
+            kind=step.kind,
+            content=step.content,
+            duration=getattr(step, "duration", 0.0),
+            children=[cls.from_tracer_step(child) for child in getattr(step, "children", [])],
+            annotations=getattr(step, "annotations", []),
         )
 
 
 class Trace(BaseModel):
-    """Complete trace model used by storage, API, and the frontend.
+    """Complete trace with summary fields for fast listing and analytics."""
 
-    Includes aggregated statistics (tokens, success) derived from the tree.
-    """
-
-    id: str
-    name: str = "workflow"
-    root_step: Step
-    start: datetime
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str
+    start: datetime = Field(default_factory=datetime.utcnow)
     duration: float = 0.0
     success: bool = True
     total_tokens: int = 0
+    root_step: Step
 
     model_config = ConfigDict(from_attributes=True)
 
     @classmethod
-    def from_tracer_context(cls, context: Any) -> Trace:
-        """Build a validated Trace from a live tracer.TraceContext.
-
-        Performs a tree walk to compute aggregate stats. Uses wall-clock
-        time for the start field because the tracer only records monotonic
-        perf_counter values.
-        """
-        root_step_obj = getattr(context, "root_step", None)
-        trace_start = getattr(context, "start", datetime.now())
-        root_perf_start = getattr(root_step_obj, "start", 0.0) if root_step_obj else 0.0
-        root_step = Step.from_tracer(root_step_obj, trace_start, root_perf_start)
-
-        total_tokens = 0
-        success = True
-
-        def visit(s: Step) -> None:
-            nonlocal total_tokens, success
-            if s.kind == "llm" and isinstance(s.content, dict):
-                total_tokens += int(s.content.get("tokens", 0))
-            if isinstance(s.content, dict) and (
-                s.content.get("status") == "failed" or "error" in s.content
-            ):
-                success = False
-            for child in s.children:
-                visit(child)
-
-        visit(root_step)
-
+    def from_tracer_context(cls, tc: Any) -> "Trace":
+        """Build a Pydantic Trace from a live TraceContext (avoids circular import)."""
         return cls(
-            id=context.trace_id,
-            name=context.name,
-            root_step=root_step,
-            start=getattr(context, "start", datetime.now()),
-            duration=getattr(context.root_step, "duration", 0.0),
-            success=getattr(context, "success", success),
-            total_tokens=total_tokens,
+            id=getattr(tc, "id", str(uuid.uuid4())),
+            name=getattr(tc, "name", "workflow"),
+            start=datetime.utcnow(),
+            duration=getattr(tc, "duration", 0.0),
+            success=getattr(tc, "success", True),
+            total_tokens=getattr(tc, "total_tokens", 0),
+            root_step=Step.from_tracer_step(getattr(tc, "root_step", None)),
         )
 
+    @property
+    def duration_ms(self) -> float:
+        return round(self.duration * 1000, 2)
+
     def get_flame_data(self) -> List[Dict[str, Any]]:
-        """Return list of steps with relative timing for flamegraph rendering.
-
-        Each entry contains id, name, kind, duration_ms, start_ms (relative to
-        trace start), depth and tokens (when present). Used by the interactive
-        SVG flamegraph in the dashboard.
-        """
-        flame: List[Dict[str, Any]] = []
-
-        def recurse(step: Step, depth: int = 0) -> None:
-            start_ms = 0.0
-            if step.start and self.start:
-                delta = step.start - self.start
-                start_ms = delta.total_seconds() * 1000
-            flame.append(
+        """Return flat list of steps with depth for flamegraph rendering."""
+        data = []
+        def visit(s: Step, depth: int = 0, offset: float = 0.0) -> float:
+            start = offset
+            for child in s.children:
+                offset = visit(child, depth + 1, offset)
+            data.append(
                 {
-                    "id": step.id,
-                    "name": step.name,
-                    "kind": step.kind,
-                    "duration_ms": step.duration_ms,
-                    "start_ms": round(start_ms, 2),
+                    "id": s.id,
+                    "name": s.name,
+                    "kind": s.kind,
+                    "duration": s.duration,
                     "depth": depth,
-                    "tokens": int(step.content.get("tokens", 0))
-                    if isinstance(step.content, dict)
-                    else 0,
+                    "start": start,
+                    "annotations": s.annotations,
                 }
             )
-            for child in step.children:
-                recurse(child, depth + 1)
-
-        recurse(self.root_step)
-        return flame
+            return offset + s.duration
+        visit(self.root_step)
+        return data
 
     def get_token_data(self) -> List[Dict[str, Any]]:
-        """Return list of LLM steps with token counts for the analytics chart.
-
-        Sorted descending by token count. Used by the per-step token bar chart.
-        """
-        tokens: List[Dict[str, Any]] = []
-
-        def recurse(step: Step) -> None:
-            if (
-                step.kind == "llm"
-                and isinstance(step.content, dict)
-                and (t := step.content.get("tokens"))
-            ):
+        """Extract LLM steps for token bar chart."""
+        tokens = []
+        def visit(s: Step):
+            if s.kind == "llm" and s.content.get("tokens"):
                 tokens.append(
                     {
-                        "id": step.id,
-                        "name": step.name,
-                        "tokens": int(t),
-                        "duration_ms": step.duration_ms,
+                        "name": s.name,
+                        "tokens": s.content.get("tokens", 0),
+                        "annotations": len(s.annotations),
                     }
                 )
-            for child in step.children:
-                recurse(child)
-
-        recurse(self.root_step)
+            for c in s.children:
+                visit(c)
+        visit(self.root_step)
         return sorted(tokens, key=lambda x: x["tokens"], reverse=True)
 
-    def to_opentelemetry(self) -> Dict[str, Any]:
-        """Export to OpenTelemetry compatible OTLP JSON format.
-
-        The returned structure can be sent to an OTEL collector or used with
-        Jaeger, Grafana Tempo, or other OTEL-native tools. LangSmith also
-        supports OTEL traces.
-        """
-        trace_id_hex = _uuid_to_hex(self.id, 32)
-        spans: List[Dict[str, Any]] = []
-
-        def add_span(step: Step, parent_span_id: Optional[str] = None) -> None:
-            span_id_hex = _uuid_to_hex(step.id, 16)
-            if step.start is not None:
-                start_ns = int(step.start.timestamp() * 1_000_000_000)
-            else:
-                start_ns = int(self.start.timestamp() * 1_000_000_000)
-            duration_ns = int((getattr(step, "duration_ms", 0.0)) * 1_000_000)
-            end_ns = start_ns + duration_ns
-
-            attributes: List[Dict[str, Any]] = []
-            content = step.content if isinstance(step.content, dict) else {}
-            for k, v in content.items():
-                if k in (
-                    "prompt",
-                    "response",
-                    "error",
-                    "input",
-                    "output",
-                    "query",
-                    "tokens",
-                    "status",
-                    "invocation_params",
-                ):
-                    attributes.append(
-                        {"key": f"flowtrace.{k}", "value": _to_otel_attribute_value(v)}
-                    )
-            if step.kind == "llm" and content.get("tokens"):
-                attributes.append(
+    def add_annotation(
+        self, step_id: str, text: str, metadata: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """Add an annotation to a step by ID (used by API and storage)."""
+        def recurse(step: Step) -> bool:
+            if step.id == step_id:
+                step.annotations.append(
                     {
-                        "key": "gen_ai.completion.token_count",
-                        "value": _to_otel_attribute_value(content["tokens"]),
+                        "text": text,
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "metadata": metadata or {},
                     }
                 )
-
-            code = 2 if content.get("status") == "failed" or "error" in content else 0
-            status = {"code": code}
-            if content.get("error"):
-                status["message"] = str(content["error"])
-
-            span = {
-                "traceId": trace_id_hex,
-                "spanId": span_id_hex,
-                "parentSpanId": parent_span_id or "",
-                "name": step.name,
-                "kind": 3 if step.kind == "llm" else 4 if step.kind in ("tool", "retrieval") else 1,
-                "startTimeUnixNano": str(start_ns),
-                "endTimeUnixNano": str(end_ns),
-                "attributes": attributes,
-                "status": status,
-            }
-            spans.append(span)
+                return True
             for child in step.children:
-                add_span(child, span_id_hex)
+                if recurse(child):
+                    return True
+            return False
+        return recurse(self.root_step)
 
-        add_span(self.root_step)
+    def to_opentelemetry(self) -> Dict[str, Any]:
+        """Export to OTLP format (resourceSpans)."""
         return {
             "resourceSpans": [
                 {
-                    "resource": {
-                        "attributes": [
-                            {"key": "service.name", "value": {"stringValue": "flowtrace"}},
-                            {"key": "workflow.name", "value": {"stringValue": self.name}},
-                        ]
-                    },
+                    "resource": {"attributes": []},
                     "scopeSpans": [
                         {
-                            "scope": {"name": "flowtrace", "version": "0.1.0"},
-                            "spans": spans,
+                            "scope": {},
+                            "spans": self._build_otel_spans(),
                         }
                     ],
                 }
             ]
         }
 
-    def to_langsmith(self) -> List[Dict[str, Any]]:
-        """Export to a list of runs compatible with LangSmith's format.
+    def _build_otel_spans(self) -> List[Dict]:
+        spans = []
+        def recurse(s: Step, parent_id: Optional[str] = None):
+            span_id = _uuid_to_hex(s.id, 16)
+            trace_id = _uuid_to_hex(self.id, 32)
+            span = {
+                "traceId": trace_id,
+                "spanId": span_id,
+                "name": s.name,
+                "kind": 1,
+                "startTimeUnixNano": "0",
+                "endTimeUnixNano": "0",
+                "attributes": [
+                    {"key": "flowtrace.kind", "value": _to_otel_attribute_value(s.kind)},
+                    {"key": "flowtrace.annotations", "value": _to_otel_attribute_value(s.annotations)},
+                ],
+                "status": {},
+            }
+            if parent_id:
+                span["parentSpanId"] = parent_id
+            spans.append(span)
+            for child in s.children:
+                recurse(child, span_id)
+        recurse(self.root_step)
+        return spans
 
-        Can be used with ``langsmith.Client().run_tree(...)`` or bulk upload.
-        """
-        runs: List[Dict[str, Any]] = []
-
-        def add_run(step: Step, parent_run_id: Optional[str] = None) -> None:
-            content = step.content if isinstance(step.content, dict) else {}
-            run_type = {
-                "llm": "llm",
-                "tool": "tool",
-                "retrieval": "tool",
-                "embedding": "tool",
-                "query": "chain",
-                "agent": "chain",
-                "chain": "chain",
-            }.get(step.kind, "chain")
-
-            inputs = {}
-            if "prompt" in content:
-                inputs["prompt"] = content["prompt"]
-            elif "query" in content:
-                inputs["query"] = content["query"]
-            elif "input" in content:
-                inputs = content["input"] if isinstance(content["input"], dict) else {"input": content["input"]}
-            elif "inputs" in content:
-                inputs = content["inputs"]
-
-            outputs = {}
-            if "response" in content:
-                outputs["response"] = content["response"]
-            elif "output" in content:
-                outputs = content["output"] if isinstance(content["output"], dict) else {"output": content["output"]}
-            elif "outputs" in content:
-                outputs = content["outputs"]
-
-            error = content.get("error")
-            start_time = step.start.isoformat() if step.start else self.start.isoformat()
-            end_time = start_time
-            if step.start and step.duration_ms > 0:
-                dt = timedelta(milliseconds=step.duration_ms)
-                end_time = (step.start + dt).isoformat()
-
-            run: Dict[str, Any] = {
-                "id": step.id,
-                "name": step.name,
-                "run_type": run_type,
-                "start_time": start_time,
-                "end_time": end_time,
-                "inputs": inputs,
-                "outputs": outputs,
-                "error": error,
+    def to_langsmith(self) -> List[Dict]:
+        """Export to LangSmith run format (flat list of runs)."""
+        runs = []
+        def recurse(s: Step, parent_run_id: Optional[str] = None):
+            run = {
+                "id": s.id,
+                "name": s.name,
+                "run_type": s.kind,
+                "inputs": s.content.get("prompt") or s.content.get("args"),
+                "outputs": s.content.get("response") or s.content.get("result"),
                 "parent_run_id": parent_run_id,
                 "trace_id": self.id,
-                "extra": {
-                    "metadata": {
-                        "kind": step.kind,
-                        "duration_ms": step.duration_ms,
-                    }
-                },
+                "extra": {"annotations": s.annotations},
             }
-            if "tokens" in content:
-                run["extra"]["total_tokens"] = content["tokens"]
             runs.append(run)
-            for child in step.children:
-                add_run(child, step.id)
-
-        add_run(self.root_step)
+            for child in s.children:
+                recurse(child, s.id)
+        recurse(self.root_step)
         return runs
 
 
 class TraceSummary(BaseModel):
-    """Lightweight summary for the trace browser / history list."""
-
+    """Lightweight summary for the trace list view."""
     id: str
     name: str
     start: datetime
     duration_ms: float
-    success: bool = True
-    total_tokens: int = 0
-
-    model_config = ConfigDict(from_attributes=True)
+    total_tokens: int
+    success: bool
+    step_count: int
 
 
 class TraceComparison(BaseModel):
-    """Model returned by the side-by-side comparison endpoint."""
-
+    """Result of side-by-side trace comparison."""
     trace1: Trace
     trace2: Trace
-    differences: Dict[str, Any] = Field(default_factory=dict)
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-def export_to_opentelemetry(trace: Any) -> Dict[str, Any]:
-    """Export any trace (Trace instance or TraceContext) to OpenTelemetry format."""
-    if isinstance(trace, Trace):
-        return trace.to_opentelemetry()
-    # assume it's a TraceContext
-    return Trace.from_tracer_context(trace).to_opentelemetry()
-
-
-def export_to_langsmith(trace: Any) -> List[Dict[str, Any]]:
-    """Export any trace (Trace instance or TraceContext) to LangSmith format."""
-    if isinstance(trace, Trace):
-        return trace.to_langsmith()
-    return Trace.from_tracer_context(trace).to_langsmith()
+    differences: Dict[str, Any]

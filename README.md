@@ -48,7 +48,7 @@ Strict hierarchical grid showing flow, nesting and timing
 </td>
 <td align="center" valign="top" width="25%">
 🔎 <b>Prompt inspector</b><br>
-Click any node for raw prompts, responses, tokens and metadata
+Click any node for prompts, responses, tokens, annotations, metadata and errors
 </td>
 <td align="center" valign="top" width="25%">
 🔥 <b>Latency flamegraph &amp; token analytics</b><br>
@@ -200,12 +200,16 @@ from flowtrace import TraceContext
 
 with TraceContext(name="CustomerSupportAgent") as tc:
     tc.record_step("Load user profile", "setup")
-    tc.record_step("Log event")  # kind defaults to "step"
+    log_step = tc.record_step("Log event")
+    log_step.annotate("User confirmed identity via email")
     
-    with tc.step("Generate response", kind="phase", metadata={"model": "gpt-4"}):
+    with tc.step("Generate response", kind="phase", metadata={"model": "gpt-4"}) as step:
         tc.record_llm_call("You are a helpful agent...", "Here is your refund link", 87)
         tc.record_tool_call("get_order", {"order_id": 42}, {"status": "shipped"})
+        step.annotate("Response generated with refund policy v2.1", metadata={"version": "2.1"})
 ```
+
+Any `Step` (returned by `record_step`, yielded by the `step` context manager, or obtained via `current_trace()`) now supports `.annotate(text, metadata=None)`. Annotations are persisted, streamed live, and shown in the inspector panel.
 
 ### Live streaming
 
@@ -351,6 +355,24 @@ with tc.step("RiskyAPI"):
 ```
 </details>
 
+<details><summary>Advanced: Manual annotations on steps</summary>
+
+```python
+log_step = tc.record_step("Log event")
+log_step.annotate("User confirmed identity via email")
+
+with tc.step("Generate response") as step:
+    ...
+    step.annotate("Response generated with refund policy v2.1", metadata={"version": "2.1"})
+
+# or via current trace by id
+tc = current_trace()
+tc.annotate("High-priority observation", step_id=some_step.id)
+```
+
+Annotations are stored on the step, streamed live, persisted in SQLite, exported in OTEL/LangSmith payloads, and displayed in the inspector.
+</details>
+
 <details><summary>Advanced: Replaying a saved trace with mocks</summary>
 
 Load a trace via the UI or `flowtrace view`, then replay it while overriding tool calls using the same `record_tool_call` hooks with deterministic results.
@@ -457,7 +479,7 @@ The test suite (`tests/test_tracer.py`) covers `TraceContext` nested step constr
 - [x] Create first-party LlamaIndex integration adapter
 - [x] Export traces to OpenTelemetry / LangSmith compatible format
 - [x] Add latency flamegraph and per-step token analytics dashboard
-- [ ] Support manual annotations and comments on any step
+- [x] Support manual annotations and comments on any step
 - [ ] Implement trace replay with swapped model parameters or mocked outputs
 - [ ] Add plugin system for custom step visualizers and badges
 - [ ] Provide official Docker image with one-command deployment

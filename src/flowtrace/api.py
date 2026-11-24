@@ -282,3 +282,41 @@ async def live_trace_update(
         },
     )
     return {"status": "broadcasted"}
+
+
+@router.post("/traces/{trace_id}/annotate", status_code=status.HTTP_201_CREATED)
+async def add_annotation(
+    trace_id: str,
+    payload: Dict[str, Any],
+    store: SQLiteStore = Depends(get_store),
+) -> Dict[str, str]:
+    """Add a manual annotation/comment to any step.
+
+    Payload must contain ``step_id`` and ``text``. ``metadata`` is optional.
+    The update is persisted and broadcast to live WebSocket clients.
+    """
+    step_id = payload.get("step_id")
+    text = payload.get("text")
+    if not step_id or not isinstance(text, str) or not text.strip():
+        raise HTTPException(
+            status_code=400, detail="step_id and non-empty text are required"
+        )
+
+    trace = store.get_trace(trace_id)
+    if trace is None:
+        raise HTTPException(status_code=404, detail="Trace not found")
+
+    if not trace.add_annotation(step_id, text, payload.get("metadata")):
+        raise HTTPException(status_code=404, detail="Step not found")
+
+    store.save_trace(trace)
+
+    await manager.broadcast(
+        trace_id,
+        {
+            "type": "trace_update",
+            "trace_id": trace_id,
+            "annotation": {"step_id": step_id, "text": text},
+        },
+    )
+    return {"status": "added", "step_id": step_id}
